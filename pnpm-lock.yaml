@@ -17,6 +17,18 @@ importers:
 
   apps/api:
     dependencies:
+      '@exec-assistant/ai':
+        specifier: workspace:*
+        version: link:../../packages/ai
+      '@exec-assistant/calendar':
+        specifier: workspace:*
+        version: link:../../packages/calendar
+      '@exec-assistant/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@exec-assistant/whatsapp':
+        specifier: workspace:*
+        version: link:../../packages/whatsapp
       dotenv:
         specifier: ^16.4.5
         version: 16.6.1
@@ -27,6 +39,86 @@ importers:
       '@types/express':
         specifier: ^4.17.21
         version: 4.17.25
+      '@types/node':
+        specifier: ^22.5.0
+        version: 22.20.1
+      tsx:
+        specifier: ^4.16.5
+        version: 4.23.12
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  apps/worker:
+    dependencies:
+      '@exec-assistant/ai':
+        specifier: workspace:*
+        version: link:../../packages/ai
+      '@exec-assistant/calendar':
+        specifier: workspace:*
+        version: link:../../packages/calendar
+      '@exec-assistant/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@exec-assistant/whatsapp':
+        specifier: workspace:*
+        version: link:../../packages/whatsapp
+      dotenv:
+        specifier: ^16.4.5
+        version: 16.6.1
+    devDependencies:
+      '@types/node':
+        specifier: ^22.5.0
+        version: 22.20.1
+      tsx:
+        specifier: ^4.16.5
+        version: 4.23.12
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  packages/ai:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.5.0
+        version: 22.20.1
+      tsx:
+        specifier: ^4.16.5
+        version: 4.23.12
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  packages/calendar:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.5.0
+        version: 22.20.1
+      tsx:
+        specifier: ^4.16.5
+        version: 4.23.12
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  packages/db:
+    dependencies:
+      postgres:
+        specifier: ^3.4.5
+        version: 3.4.9
+    devDependencies:
+      '@types/node':
+        specifier: ^22.5.0
+        version: 22.20.1
+      tsx:
+        specifier: ^4.16.5
+        version: 4.23.12
+      typescript:
+        specifier: ^5.5.4
+        version: 5.9.3
+
+  packages/whatsapp:
+    devDependencies:
       '@types/node':
         specifier: ^22.5.0
         version: 22.20.1
@@ -435,6 +527,10 @@ packages:
 
   path-to-regexp@0.1.13:
     resolution: {integrity: sha512-A/AGNMFN3c8bOlvV9RreMdrv7jsmF9XIfDeCd87+I8RNg6s78BhJxMu69NEMHBSJFxKidViTEdruRwEk/WIKqA==}
+
+  postgres@3.4.9:
+    resolution: {integrity: sha512-GD3qdB0x1z9xgFI6cdRD6xu2Sp2WCOEoe3mtnyB5Ee0XrrL5Pe+e4CCnJrRMnL1zYtRDZmQQVbvOttLnKDLnaw==}
+    engines: {node: '>=12'}
 
   prettier@3.9.6:
     resolution: {integrity: sha512-OpN0zzVdiaiAhxpuuj5efpIS4sY9j7bY6uR5mnj5yPzGkdkjNKSJeUThPb60Jw29QuAZgA4o+/iB49kFiaBX6g==}
@@ -894,6 +990,8 @@ snapshots:
   parseurl@1.3.3: {}
 
   path-to-regexp@0.1.13: {}
+
+  postgres@3.4.9: {}
 
   prettier@3.9.6: {}
 

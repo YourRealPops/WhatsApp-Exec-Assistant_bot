@@ -5,7 +5,10 @@
   "scripts": {
     "dev:api": "pnpm --filter @exec-assistant/api start:dev",
     "dev:worker": "pnpm --filter @exec-assistant/worker dev",
+    "dev:cli": "pnpm --filter @exec-assistant/api cli",
     "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
     "lint": "pnpm -r lint",
     "format": "prettier --write ."
   },
