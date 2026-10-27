@@ -80,7 +80,7 @@ export const DEFAULT_OFFSETS = [15, 10, 5, 0];
 
 export async function ensureUser(
   db: Db,
-  input: { phone: string; timezone?: string; name?: string | null },
+  input: { phone: string; timezone?: string; name?: string | null }
 ): Promise<User> {
   const rows = await db`
     insert into users (phone, timezone, name)
@@ -97,7 +97,7 @@ export async function getUserById(db: Db, id: string): Promise<User | null> {
 
 export async function getUserByPhone(
   db: Db,
-  phone: string,
+  phone: string
 ): Promise<User | null> {
   const rows = await db`select * from users where phone = ${phone}`;
   return (rows[0] as unknown as User) ?? null;
@@ -115,11 +115,13 @@ export async function saveMessage(
     direction: "inbound" | "outbound";
     body: string;
     channel?: string;
-  },
+  }
 ): Promise<boolean> {
   const rows = await db`
     insert into messages (id, user_id, direction, body, channel)
-    values (${msg.id}, ${msg.userId}, ${msg.direction}, ${msg.body}, ${msg.channel ?? "whatsapp"})
+    values (${msg.id}, ${msg.userId}, ${msg.direction}, ${msg.body}, ${
+    msg.channel ?? "whatsapp"
+  })
     on conflict (id) do nothing
     returning id`;
   return rows.length > 0;
@@ -129,7 +131,7 @@ export async function saveMessage(
 export async function listHistory(
   db: Db,
   userId: string,
-  limit = 20,
+  limit = 20
 ): Promise<Message[]> {
   const rows = await db`
     select * from messages
@@ -152,7 +154,7 @@ export async function upsertCalendarAccount(
     refreshToken?: string | null;
     expiresAt?: Date | null;
     calendarId?: string;
-  },
+  }
 ): Promise<CalendarAccount> {
   const rows = await db`
     insert into calendar_accounts
@@ -174,15 +176,16 @@ export async function upsertCalendarAccount(
 
 export async function getCalendarAccount(
   db: Db,
-  userId: string,
+  userId: string
 ): Promise<CalendarAccount | null> {
-  const rows = await db`select * from calendar_accounts where user_id = ${userId}`;
+  const rows =
+    await db`select * from calendar_accounts where user_id = ${userId}`;
   return (rows[0] as unknown as CalendarAccount) ?? null;
 }
 
 export async function listAccountsDueSync(
   db: Db,
-  intervalMs: number,
+  intervalMs: number
 ): Promise<CalendarAccount[]> {
   const cutoff = new Date(Date.now() - intervalMs);
   const rows = await db`
@@ -199,7 +202,7 @@ export async function markSynced(db: Db, accountId: string): Promise<void> {
 export async function updateAccountTokens(
   db: Db,
   accountId: string,
-  tokens: { accessToken: string; expiresAt: Date | null },
+  tokens: { accessToken: string; expiresAt: Date | null }
 ): Promise<void> {
   await db`
     update calendar_accounts
@@ -214,7 +217,7 @@ export async function updateAccountTokens(
 export async function upsertEvents(
   db: Db,
   userId: string,
-  events: EventInput[],
+  events: EventInput[]
 ): Promise<CalEvent[]> {
   const out: CalEvent[] = [];
   for (const e of events) {
@@ -223,7 +226,9 @@ export async function upsertEvents(
         (user_id, external_id, title, start_at, end_at, location, description, status, updated_at)
       values
         (${userId}, ${e.externalId}, ${e.title}, ${e.start}, ${e.end},
-         ${e.location ?? null}, ${e.description ?? null}, ${e.status ?? "confirmed"}, now())
+         ${e.location ?? null}, ${e.description ?? null}, ${
+      e.status ?? "confirmed"
+    }, now())
       on conflict (user_id, external_id) do update set
         title = excluded.title,
         start_at = excluded.start_at,
@@ -243,7 +248,7 @@ export async function listUpcomingEvents(
   userId: string,
   from: Date,
   to: Date,
-  limit = 200,
+  limit = 200
 ): Promise<CalEvent[]> {
   const rows = await db`
     select * from events
@@ -268,7 +273,7 @@ export async function listUpcomingEvents(
 export async function materializeReminders(
   db: Db,
   event: { id: string; userId: string; startAt: Date },
-  offsets: number[],
+  offsets: number[]
 ): Promise<number> {
   if (offsets.length === 0) return 0;
   const rows = await db`
@@ -290,7 +295,7 @@ export async function materializeReminders(
  */
 export async function materializeAllReminders(
   db: Db,
-  opts: { offsets: number[]; lookaheadDays: number; maxOffsetMinutes: number },
+  opts: { offsets: number[]; lookaheadDays: number; maxOffsetMinutes: number }
 ): Promise<number> {
   if (opts.offsets.length === 0) return 0;
   const rows = await db`
@@ -311,7 +316,7 @@ export async function materializeAllReminders(
 /** One-off reminder not tied to a calendar event. Deduped on (user, time, note). */
 export async function createAdHocReminder(
   db: Db,
-  input: { userId: string; fireAt: Date; note: string },
+  input: { userId: string; fireAt: Date; note: string }
 ): Promise<Reminder | null> {
   const rows = await db`
     insert into reminders (user_id, event_id, offset_minutes, fire_at, note)
@@ -339,18 +344,22 @@ export interface ReminderDetail extends Reminder {
 export async function claimDueReminders(
   db: Db,
   now: Date,
-  limit: number,
+  limit: number
 ): Promise<ReminderDetail[]> {
   const rows = await db`
     with claimed as (
       update reminders
       set status = 'sending', attempts = attempts + 1, updated_at = now()
       where id in (
-        select id from reminders
-        where status = 'pending' and fire_at <= ${now}
-        order by fire_at
-        limit ${limit}
-        for update skip locked
+        select r2.id from reminders r2
+where r2.status = 'pending'
+  and r2.fire_at <= ${now}
+  and (r2.event_id is null
+       or exists (select 1 from events e
+                  where e.id = r2.event_id and e.status <> 'cancelled'))
+order by r2.fire_at
+limit ${limit}
+for update skip locked
       )
       returning *
     )
@@ -373,18 +382,54 @@ export async function markReminderFailed(
   db: Db,
   id: string,
   error: string,
-  retry: boolean,
+  retry: boolean
 ): Promise<void> {
   await db`
     update reminders
-    set status = ${retry ? "pending" : "failed"}, last_error = ${error}, updated_at = now()
+    set status = ${
+      retry ? "pending" : "failed"
+    }, last_error = ${error}, updated_at = now()
     where id = ${id}`;
+}
+
+/** Return rows stuck in 'sending' (worker died mid-send) to the queue, or fail them if out of attempts. */
+export async function requeueStuckReminders(
+  db: Db,
+  olderThanMinutes: number,
+  maxAttempts: number
+): Promise<number> {
+  const rows = await db`
+    update reminders
+    set status = case when attempts >= ${maxAttempts} then 'failed' else 'pending' end,
+        last_error = case when attempts >= ${maxAttempts}
+                          then 'worker died mid-send' else last_error end,
+        updated_at = now()
+    where status = 'sending'
+      and updated_at < now() - make_interval(mins => ${olderThanMinutes})
+    returning id`;
+  return rows.length;
+}
+
+/** Event reminders that missed their window are dropped; ad-hoc reminders are never expired. */
+export async function expireStaleReminders(
+  db: Db,
+  now: Date,
+  graceMinutes: number
+): Promise<number> {
+  const rows = await db`
+    update reminders
+    set status = 'failed', last_error = 'expired: missed delivery window', updated_at = now()
+    where status = 'pending'
+      and event_id is not null
+      and fire_at < ${now}::timestamptz - make_interval(mins => ${graceMinutes})
+    returning id`;
+  return rows.length;
 }
 
 export async function listReminders(
   db: Db,
   userId: string,
-  opts: { limit?: number; status?: string } = {},
+  opts: { limit?: number; status?: string } = {}
 ): Promise<Reminder[]> {
   const limit = opts.limit ?? 50;
   if (opts.status) {
@@ -409,7 +454,7 @@ export interface UpcomingReminder extends Reminder {
 export async function listUpcomingReminders(
   db: Db,
   userId: string,
-  limit = 20,
+  limit = 20
 ): Promise<UpcomingReminder[]> {
   const rows = await db`
     select r.*, e.title as event_title
@@ -435,7 +480,7 @@ export async function listUsersWithoutCalendar(db: Db): Promise<User[]> {
 /** Drop still-pending reminders for events that disappeared or were cancelled. */
 export async function cancelEventReminders(
   db: Db,
-  eventIds: string[],
+  eventIds: string[]
 ): Promise<number> {
   let removed = 0;
   for (const eventId of eventIds) {
