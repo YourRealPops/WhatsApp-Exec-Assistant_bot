@@ -52,7 +52,7 @@ export default function Hero() {
             transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
           >
             ECOS lives inside WhatsApp. Hand it your calendar, your follow-ups
-            and the reminders you keep forgetting — it runs the logistics of
+            and the reminders you keep forgetting. It runs the logistics of
             your day so you can stay on the work only you can do.
           </motion.p>
 

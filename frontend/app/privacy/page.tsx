@@ -23,23 +23,23 @@ export default function PrivacyPage() {
         <p>Depending on how you use {APP_NAME} (\"ECOS\", \"we\", \"us\"), we may collect:</p>
         <ul>
           <li>
-            <strong>Information you give us</strong> — your name, WhatsApp
+            <strong>Information you give us</strong>: your name, WhatsApp
             number, email address and any details you share while chatting with
             ECOS.
           </li>
           <li>
-            <strong>Content you submit</strong> — messages, reminders,
+            <strong>Content you submit</strong>: messages, reminders,
             tasks, notes and calendar details you ask ECOS to handle, so it can
             deliver the service you requested.
           </li>
           <li>
-            <strong>Connected services data</strong> — calendar events and
+            <strong>Connected services data</strong>: calendar events and
             similar records from services you choose to connect (for example
             Google Calendar or Microsoft Outlook), used only to perform the
             actions you ask for.
           </li>
           <li>
-            <strong>Usage and device data</strong> — log data such as IP
+            <strong>Usage and device data</strong>: log data such as IP
             address, browser type, pages viewed and timestamps, used for
             security, debugging and improving the service.
           </li>
@@ -48,7 +48,7 @@ export default function PrivacyPage() {
         <h2>2. How we use your information</h2>
         <p>We use the information we collect to:</p>
         <ul>
-          <li>Provide, operate and maintain ECOS — scheduling, reminders, follow-ups and the replies you ask for;</li>
+          <li>Provide, operate and maintain ECOS: scheduling, reminders, follow-ups and the replies you ask for;</li>
           <li>Personalise and improve the service, including response quality and new features;</li>
           <li>Respond to your questions and provide support;</li>
           <li>Send service-related notices (such as changes to this policy);</li>
@@ -64,7 +64,7 @@ export default function PrivacyPage() {
         <h2>3. WhatsApp and messaging platforms</h2>
         <p>
           ECOS works through WhatsApp, so your messages travel over Meta&apos;s
-          infrastructure. Meta processes your data under its own terms — see the{" "}
+          infrastructure. Meta processes your data under its own terms; see the{" "}
           <a
             href="https://www.whatsapp.com/legal/privacy-policy"
             target="_blank"
@@ -94,7 +94,7 @@ export default function PrivacyPage() {
           </li>
           <li>
             <strong>A successor entity</strong>, in connection with a merger,
-            acquisition or sale of assets — we will notify you first.
+            acquisition or sale of assets. We will notify you first.
           </li>
         </ul>
 
@@ -109,8 +109,8 @@ export default function PrivacyPage() {
 
         <h2>6. Security</h2>
         <p>
-          We use reasonable technical and organisational measures — including
-          encryption in transit and access controls — to protect your
+          We use reasonable technical and organisational measures (including
+          encryption in transit and access controls) to protect your
           information. No method of transmission or storage is completely
           secure, so we cannot guarantee absolute security.
         </p>
@@ -122,7 +122,7 @@ export default function PrivacyPage() {
           personal information, to object to or restrict certain processing,
           and to withdraw consent at any time. To exercise any of these rights,
           contact us using the details on the{" "}
-          <a href="/contact">Contact Us</a> page — we will respond within the
+          <a href="/contact">Contact Us</a> page. We will respond within the
           timeframe required by applicable law.
         </p>
 
@@ -156,7 +156,7 @@ export default function PrivacyPage() {
           <a href={`tel:${COMPANY.phone}`}>{COMPANY.phoneDisplay}</a>.
         </p>
         <p>
-          {COMPANY.name} — {COMPANY.address}
+          {COMPANY.name}, {COMPANY.address}
         </p>
       </div>
     </StaticPage>

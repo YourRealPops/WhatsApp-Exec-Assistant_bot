@@ -6,7 +6,7 @@ import { pageMetadata } from "@/lib/seo";
 
 export const metadata: Metadata = pageMetadata(
   "About Us",
-  `${APP_NAME} is an Electronic Chief Of Staff that lives in WhatsApp — built for people who are tired of managing their own admin.`,
+  `${APP_NAME} is an Electronic Chief Of Staff that lives in WhatsApp, built for people who are tired of managing their own admin.`,
   "/about",
 );
 
@@ -15,13 +15,13 @@ export default function AboutPage() {
     <StaticPage
       eyebrow="About us"
       title="Built for people who are their own chief of staff."
-      lead={`${APP_NAME} — the ${APP_TAGLINE} — exists because the busywork of running a day should not eat the day itself.`}
+      lead={`${APP_NAME}, the ${APP_TAGLINE}, exists because the busywork of running a day should not eat the day itself.`}
     >
       <div className="prose">
         <h2>Why we started</h2>
         <p>
           Most knowledge workers don&apos;t need another app. They need
-          someone — or something — to catch the follow-up that slipped, move
+          someone (or something) to catch the follow-up that slipped, move
           the meeting that clashed, and remind them about the thing they said
           they&apos;d do on Tuesday. That work is real, but it isn&apos;t the
           work only you can do.
@@ -48,7 +48,7 @@ export default function AboutPage() {
           </li>
           <li>
             <strong>Privacy is the default.</strong> We collect only what the
-            service needs — see our <a href="/privacy">Privacy Policy</a>.
+            service needs. See our <a href="/privacy">Privacy Policy</a>.
           </li>
         </ul>
 
@@ -56,7 +56,7 @@ export default function AboutPage() {
         <p>
           Message ECOS the way you would message a person. It reads the
           context, uses your connected calendar and contacts when you allow it,
-          and comes back with the result — a rescheduled event, a reminder set,
+          and comes back with the result: a rescheduled event, a reminder set,
           a follow-up sent. Everything happens in the conversation, and
           everything is visible in the thread.
         </p>

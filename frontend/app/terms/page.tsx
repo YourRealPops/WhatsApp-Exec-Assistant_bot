@@ -14,7 +14,7 @@ export default function TermsPage() {
     <StaticPage
       eyebrow="Legal"
       title="Terms of Service"
-      lead="These terms govern your use of ECOS. By messaging ECOS or using this site, you agree to them — please read them carefully."
+      lead="These terms govern your use of ECOS. By messaging ECOS or using this site, you agree to them. Please read them carefully."
     >
       <div className="prose">
         <span className="updated">Last updated: 31 October 2026</span>
@@ -169,7 +169,7 @@ export default function TermsPage() {
           <a href={`tel:${COMPANY.phone}`}>{COMPANY.phoneDisplay}</a>.
         </p>
         <p>
-          {COMPANY.name} — {COMPANY.address}
+          {COMPANY.name}, {COMPANY.address}
         </p>
       </div>
     </StaticPage>

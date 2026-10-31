@@ -5,7 +5,7 @@ import Reveal from "./Reveal";
 const CAPABILITIES = [
   {
     title: "Calendar on command",
-    body: "“Move my 3pm with Ada to Thursday morning.” ECOS reads your calendar, checks what's free and books it — no app-switching, no back-and-forth.",
+    body: "“Move my 3pm with Ada to Thursday morning.” ECOS reads your calendar, checks what's free and books it. No app-switching, no back-and-forth.",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
         <rect x="3" y="5" width="18" height="16" rx="2.5" />
@@ -15,7 +15,7 @@ const CAPABILITIES = [
   },
   {
     title: "Reminders that actually land",
-    body: "Say it once in chat and ECOS holds the thread — pinging you at the right moment, in your timezone, until it's done.",
+    body: "Say it once in chat and ECOS holds the thread, pinging you at the right moment, in your timezone, until it's done.",
     icon: (
       <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
         <path d="M18 9a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6" />
@@ -52,8 +52,8 @@ export default function Features() {
           <span className="eyebrow">Capabilities</span>
           <h2>The operational layer behind your day.</h2>
           <p>
-            ECOS takes the coordination work — the scheduling, the chasing, the
-            remembering — off your plate and quietly keeps it moving.
+            ECOS takes the coordination work (the scheduling, the chasing, the
+            remembering) off your plate and quietly keeps it moving.
           </p>
         </Reveal>
 

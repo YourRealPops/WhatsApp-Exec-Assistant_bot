@@ -15,7 +15,7 @@ export default function ContactPage() {
     <StaticPage
       eyebrow="Get in touch"
       title="Contact Us"
-      lead="A real person reads everything that comes in. Pick whichever channel is easiest for you — WhatsApp is usually the fastest."
+      lead="A real person reads everything that comes in. Pick whichever channel is easiest for you. WhatsApp is usually the fastest."
     >
       <div className="grid-3 contact-grid">
         <div className="card">
@@ -25,7 +25,7 @@ export default function ContactPage() {
           <h3>WhatsApp</h3>
           <p>
             The same chat you use for ECOS. Best for support, quick questions
-            and feedback — typically answered within a few hours.
+            and feedback, typically answered within a few hours.
           </p>
           <div className="contact-actions">
             <CtaButton size="sm">Message us</CtaButton>
@@ -54,7 +54,7 @@ export default function ContactPage() {
             Prefer to talk? Call us on{" "}
             <a href={`tel:${COMPANY.phone}`}>{COMPANY.phoneDisplay}</a>.
           </p>
-          <p>Weekdays, 9am–5pm (WAT).</p>
+          <p>Weekdays, 9am-5pm (WAT).</p>
         </div>
 
         <div className="card">
@@ -78,8 +78,8 @@ export default function ContactPage() {
         <h2>Before you write</h2>
         <p>
           If ECOS did something unexpected in your chat, sending us the date
-          and a short description of what happened helps us find it quickly —
-          and yes, you can just tell ECOS itself; it forwards anything it
+          and a short description of what happened helps us find it quickly.
+          And yes, you can just tell ECOS itself; it forwards anything it
           cannot solve.
         </p>
         <p>

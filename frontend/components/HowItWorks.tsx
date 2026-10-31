@@ -9,7 +9,7 @@ const STEPS = [
   },
   {
     title: "Say what you need",
-    body: "Plain language, the way you'd brief a person. Times, people, deadlines — no forms, no syntax.",
+    body: "Plain language, the way you'd brief a person. Times, people, deadlines: no forms, no syntax.",
   },
   {
     title: "It executes and reports back",

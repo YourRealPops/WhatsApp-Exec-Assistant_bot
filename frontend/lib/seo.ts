@@ -13,7 +13,7 @@ export function pageMetadata(
   path: string,
 ): Metadata {
   const url = `${SITE_URL}${path === "/" ? "" : path}`;
-  const fullTitle = `${APP_NAME} — ${title}`;
+  const fullTitle = `${APP_NAME} | ${title}`;
 
   return {
     title: fullTitle,

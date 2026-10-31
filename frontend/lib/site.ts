@@ -9,7 +9,7 @@ const number = process.env.NEXT_PUBLIC_WHATSAPP_NUMBER ?? "15551234567";
 
 const message =
   process.env.NEXT_PUBLIC_WHATSAPP_MESSAGE ??
-  "Hi ECOS — I'd like to hand over my busywork.";
+  "Hi ECOS, I'd like to hand over my busywork.";
 
 export const WHATSAPP_URL = `https://wa.me/${number}?text=${encodeURIComponent(
   message,

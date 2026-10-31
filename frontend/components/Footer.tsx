@@ -15,7 +15,7 @@ export default function Footer() {
       <div className="container footer-inner">
         <span className="footer-owner">
           <span>
-            © {new Date().getFullYear()} {APP_NAME} — {APP_TAGLINE}
+            © {new Date().getFullYear()} {APP_NAME} | {APP_TAGLINE}
           </span>
           <small>
             A product of {COMPANY.name}

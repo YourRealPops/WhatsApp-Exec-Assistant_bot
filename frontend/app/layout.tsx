@@ -17,7 +17,7 @@ const THEME_SCRIPT =
 
 export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
-  title: `${APP_NAME} — ${APP_TAGLINE}`,
+  title: `${APP_NAME} | ${APP_TAGLINE}`,
   description,
   applicationName: APP_NAME,
   alternates: { canonical: SITE_URL },
@@ -25,13 +25,13 @@ export const metadata: Metadata = {
     type: "website",
     url: SITE_URL,
     siteName: APP_NAME,
-    title: `${APP_NAME} — ${APP_TAGLINE}`,
+    title: `${APP_NAME} | ${APP_TAGLINE}`,
     description,
     locale: "en_US",
   },
   twitter: {
     card: "summary",
-    title: `${APP_NAME} — ${APP_TAGLINE}`,
+    title: `${APP_NAME} | ${APP_TAGLINE}`,
     description,
   },
 };
