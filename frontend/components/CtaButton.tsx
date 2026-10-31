@@ -8,6 +8,7 @@ type Props = {
   variant?: "primary" | "ghost";
   size?: "sm" | "md";
   className?: string;
+  onClick?: () => void;
 };
 
 /**
@@ -19,12 +20,14 @@ export default function CtaButton({
   variant = "primary",
   size = "md",
   className = "",
+  onClick,
 }: Props) {
   return (
     <motion.a
       href={WHATSAPP_URL}
       target="_blank"
       rel="noopener noreferrer"
+      onClick={onClick}
       className={`btn btn-${variant} ${size === "sm" ? "btn-sm" : ""} ${className}`}
       whileHover={{ y: -2 }}
       whileTap={{ scale: 0.97 }}

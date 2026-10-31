@@ -17,3 +17,20 @@ export const WHATSAPP_URL = `https://wa.me/${number}?text=${encodeURIComponent(
 
 export const APP_NAME = "ECOS";
 export const APP_TAGLINE = "Electronic Chief Of Staff";
+
+/** The legal business behind ECOS. Used in the footer and contact pages. */
+export const COMPANY = {
+  name: "Enkindle Africa",
+  address: "14 Montgomery Rd, Yaba, Lagos State, Nigeria",
+  phone: "+2348039243070",
+  phoneDisplay: "+234 803 924 3070",
+} as const;
+
+/**
+ * Canonical origin used for sitemaps, canonical URLs and Open Graph tags.
+ * Override with NEXT_PUBLIC_SITE_URL when the site is served from another
+ * domain.
+ */
+export const SITE_URL = (
+  process.env.NEXT_PUBLIC_SITE_URL ?? "https://ecos.app"
+).replace(/\/$/, "");
