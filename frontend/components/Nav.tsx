@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useState } from "react";
 import CtaButton from "./CtaButton";
+import ThemeToggle from "./ThemeToggle";
 import { APP_NAME, APP_TAGLINE } from "@/lib/site";
 
 export default function Nav() {
@@ -33,18 +34,22 @@ export default function Nav() {
           </CtaButton>
         </nav>
 
-        <button
-          type="button"
-          className="menu-toggle"
-          aria-label={open ? "Close menu" : "Open menu"}
-          aria-expanded={open}
-          aria-controls="site-menu"
-          onClick={() => setOpen((v) => !v)}
-        >
-          <span />
-          <span />
-          <span />
-        </button>
+        <div className="nav-actions">
+          <ThemeToggle />
+
+          <button
+            type="button"
+            className="menu-toggle"
+            aria-label={open ? "Close menu" : "Open menu"}
+            aria-expanded={open}
+            aria-controls="site-menu"
+            onClick={() => setOpen((v) => !v)}
+          >
+            <span />
+            <span />
+            <span />
+          </button>
+        </div>
       </div>
     </header>
   );

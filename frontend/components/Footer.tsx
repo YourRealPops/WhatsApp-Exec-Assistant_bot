@@ -1,4 +1,5 @@
 import Link from "next/link";
+import BackToTop from "./BackToTop";
 import { APP_NAME, APP_TAGLINE, COMPANY } from "@/lib/site";
 
 const LEGAL_LINKS = [
@@ -17,7 +18,7 @@ export default function Footer() {
             © {new Date().getFullYear()} {APP_NAME} — {APP_TAGLINE}
           </span>
           <small>
-            A product of {COMPANY.name} · {COMPANY.address}
+            A product of {COMPANY.name}
           </small>
         </span>
 
@@ -28,8 +29,10 @@ export default function Footer() {
             </Link>
           ))}
         </nav>
+      </div>
 
-        <span>Built to be messaged, not logged into.</span>
+      <div className="container footer-actions">
+        <BackToTop />
       </div>
     </footer>
   );

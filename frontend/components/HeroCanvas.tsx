@@ -113,6 +113,53 @@ export default function HeroCanvas() {
       ringB.rotation.set(Math.PI / 1.7, -0.55, 0.4);
       group.add(ringA, ringB);
 
+      // --- theme-aware palette ------------------------------------------
+      const PALETTE = {
+        dark: {
+          core: 0x25d366,
+          coreOpacity: 0.34,
+          inner: 0x0a1410,
+          innerOpacity: 0.85,
+          particle: 0x9ff9c8,
+          particleOpacity: 0.75,
+          ring: 0x7c8cff,
+          ringOpacity: 0.45,
+        },
+        light: {
+          core: 0x0a8f4b,
+          coreOpacity: 0.5,
+          inner: 0xffffff,
+          innerOpacity: 0.72,
+          particle: 0x0a8f4b,
+          particleOpacity: 0.5,
+          ring: 0x5566e6,
+          ringOpacity: 0.4,
+        },
+      } as const;
+
+      const applyTheme = () => {
+        const p =
+          document.documentElement.dataset.theme === "light"
+            ? PALETTE.light
+            : PALETTE.dark;
+        coreMat.color.setHex(p.core);
+        coreMat.opacity = p.coreOpacity;
+        innerMat.color.setHex(p.inner);
+        innerMat.opacity = p.innerOpacity;
+        shellMat.color.setHex(p.particle);
+        shellMat.opacity = p.particleOpacity;
+        ringMat.color.setHex(p.ring);
+        ringMat.opacity = p.ringOpacity;
+      };
+      applyTheme();
+
+      // Re-tint live when the visitor flips the theme toggle.
+      const themeObserver = new MutationObserver(applyTheme);
+      themeObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["data-theme"],
+      });
+
       // --- sizing ---------------------------------------------------------
       const resize = () => {
         const w = host.clientWidth || 1;
@@ -164,6 +211,7 @@ export default function HeroCanvas() {
       cleanup = () => {
         cancelAnimationFrame(frame);
         ro.disconnect();
+        themeObserver.disconnect();
         window.removeEventListener("pointermove", onPointer);
         coreGeo.dispose();
         coreMat.dispose();
