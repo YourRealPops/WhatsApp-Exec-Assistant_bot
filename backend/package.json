@@ -7,12 +7,14 @@
     "dev:worker": "pnpm --filter @exec-assistant/worker dev",
     "dev:cli": "pnpm --filter @exec-assistant/api cli",
     "build": "pnpm -r build",
+    "start:all": "concurrently --kill-others -n api,worker \"node apps/api/dist/index.js\" \"node apps/worker/dist/index.js\"",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
     "format": "prettier --write ."
   },
   "devDependencies": {
+    "concurrently": "^10.0.6",
     "prettier": "^3.3.3",
     "typescript": "^5.5.4"
   }
