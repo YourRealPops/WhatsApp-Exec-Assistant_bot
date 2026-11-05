@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/reminders.test.ts src/messages.test.ts"
+    "test": "node --import tsx --test src/reminders.test.ts src/messages.test.ts src/calendar.test.ts"
   },
   "dependencies": {
     "postgres": "^3.4.5"

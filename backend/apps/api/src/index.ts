@@ -28,6 +28,8 @@ async function main(): Promise<void> {
     llm,
     devCalendar: env.devCalendar,
     defaultTimezone: env.defaultTimezone,
+    publicBaseUrl: env.publicBaseUrl,
+    oauthStateSecret: env.google.stateSecret,
   };
 
   const app = createApp({
@@ -44,6 +46,8 @@ async function main(): Promise<void> {
       clientSecret: env.google.clientSecret,
       redirectUri: env.google.redirectUri,
       configured: env.google.configured,
+      stateSecret: env.google.stateSecret,
+      debugRoutes: env.debugRoutes,
     },
     debug: env.debugRoutes,
   });

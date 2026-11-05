@@ -3,19 +3,31 @@ import {
   listAccountsDueSync,
   listUpcomingEvents,
   listUsersWithoutCalendar,
+  markReauthRequired,
   markSynced,
   materializeAllReminders,
+  reconcileMissingEvents,
   updateAccountTokens,
   upsertEvents,
   type CalendarAccount,
   type Db,
 } from "@exec-assistant/db";
-import { createGoogleClient, defaultDevEvents, type CalendarClient } from "@exec-assistant/calendar";
+import {
+  CalendarAuthError,
+  buildConnectUrl,
+  createGoogleClient,
+  defaultDevEvents,
+  reconnectNotice,
+  type CalendarClient,
+} from "@exec-assistant/calendar";
 import type { Sender } from "@exec-assistant/whatsapp";
+import type { Alarm } from "./alarm.js";
 
 export interface WorkerConfig {
   db: Db;
   sender: Sender;
+  /** Phone-ringing channel for reminders marked as alarms; null = disabled. */
+  alarm: Alarm | null;
   offsets: number[];
   maxOffsetMinutes: number;
   lookaheadDays: number;
@@ -25,6 +37,9 @@ export interface WorkerConfig {
   devCalendar: boolean;
   google: { clientId?: string; clientSecret?: string };
   template: { name?: string; language: string };
+  /** Needed to mint reconnect links; without them the nudge is skipped. */
+  publicBaseUrl?: string;
+  oauthStateSecret?: string;
 }
 
 function buildGoogleClient(
@@ -41,6 +56,7 @@ function buildGoogleClient(
       expiresAt: account.expires_at,
     },
     calendarId: account.calendar_id,
+    timezone: account.timezone ?? "UTC",
     onTokenRefresh: async (tokens) => {
       await updateAccountTokens(cfg.db, account.id, {
         accessToken: tokens.accessToken,
@@ -48,6 +64,43 @@ function buildGoogleClient(
       });
     },
   });
+}
+
+/**
+ * Tell the user, once, that Google needs re-consent. The 24h session window
+ * may be closed, so a failed send is only logged: the pipeline repeats the
+ * notice on their next message, where delivery is guaranteed.
+ */
+export async function notifyReauth(
+  cfg: WorkerConfig,
+  account: CalendarAccount,
+): Promise<void> {
+  const label = account.user_id.slice(0, 8);
+  if (!cfg.publicBaseUrl || !cfg.oauthStateSecret) {
+    console.warn(
+      `[worker] cannot build a reconnect link for user ${label}: set PUBLIC_BASE_URL and OAUTH_STATE_SECRET`,
+    );
+    return;
+  }
+  if (!account.phone) {
+    console.warn(`[worker] no phone on record for user ${label} — reconnect notice skipped`);
+    return;
+  }
+  try {
+    const link = buildConnectUrl({
+      baseUrl: cfg.publicBaseUrl,
+      secret: cfg.oauthStateSecret,
+      uid: account.user_id,
+    });
+    await cfg.sender.sendText(account.phone, reconnectNotice(link));
+    console.log(`[worker] reconnect notice sent to user ${label}`);
+  } catch (err) {
+    // Never puts the link in the log: it is a bearer credential.
+    console.warn(
+      `[worker] reconnect notice failed for user ${label}:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
 }
 
 /** Pull fresh events for every account due a sync. Returns events saved. */
@@ -75,17 +128,35 @@ export async function syncCalendars(cfg: WorkerConfig): Promise<number> {
       if (cancelled.length > 0) {
         await cancelEventReminders(cfg.db, cancelled);
       }
+      // The list is complete (listEvents follows every page), so anything
+      // Google did not return is gone: cancel it by absence.
+      const reconciled = await reconcileMissingEvents(cfg.db, account.user_id, {
+        from,
+        to,
+        seenExternalIds: events.map((e) => e.externalId),
+      });
       await markSynced(cfg.db, account.id);
       saved_count += saved.length;
       console.log(
         `[worker] synced ${saved.length} events for user ${label}` +
-          (cancelled.length ? ` (${cancelled.length} cancelled)` : ""),
+          (cancelled.length ? ` (${cancelled.length} cancelled)` : "") +
+          (reconciled.cancelled
+            ? ` (${reconciled.cancelled} no longer on Google, ${reconciled.remindersRemoved} reminders dropped)`
+            : ""),
       );
     } catch (err) {
-      console.error(
-        `[worker] sync failed for user ${label}:`,
-        err instanceof Error ? err.message : err,
-      );
+      const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof CalendarAuthError) {
+        // Pause the account and ask the user to reconnect. Only the first
+        // transition messages them, so a dead token can't spam every tick.
+        const first = await markReauthRequired(cfg.db, account.id).catch(() => false);
+        console.warn(
+          `[worker] Google grant rejected for user ${label} (${err.code}): ${message} — syncing paused`,
+        );
+        if (first) await notifyReauth(cfg, account);
+      } else {
+        console.error(`[worker] sync failed for user ${label}:`, message);
+      }
       // Mark synced anyway so one broken account can't hot-loop every tick.
       await markSynced(cfg.db, account.id).catch(() => {});
     }

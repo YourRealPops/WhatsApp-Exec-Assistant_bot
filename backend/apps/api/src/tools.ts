@@ -7,8 +7,17 @@ import {
   upsertEvents,
   type Db,
 } from "@exec-assistant/db";
-import { defaultDevEvents } from "@exec-assistant/calendar";
+import {
+  CONNECT_TOKEN_TTL_MS,
+  addDaysToDateStr,
+  buildConnectUrl,
+  defaultDevEvents,
+  parseWhen,
+  startOfDayInTz,
+  todayInTz,
+} from "@exec-assistant/calendar";
 import type {
+  ConnectCalendarResult,
   CreateEventResult,
   FindFreeTimeResult,
   ListEventsResult,
@@ -16,18 +25,15 @@ import type {
   SetReminderResult,
   ToolHandler,
 } from "@exec-assistant/ai";
-import {
-  addDaysToDateStr,
-  parseWhen,
-  startOfDayInTz,
-  todayInTz,
-} from "./time.js";
 
 export interface ToolContext {
   db: Db;
   userId: string;
   timezone: string;
   devCalendar: boolean;
+  /** Needed to mint a connect link; without them the tool fails politely. */
+  publicBaseUrl?: string;
+  oauthStateSecret?: string;
 }
 
 const WORKDAY_START = "09:00";
@@ -80,6 +86,7 @@ export function buildTools(ctx: ToolContext): Record<string, ToolHandler> {
           title: e.title,
           start: new Date(e.start_at).toISOString(),
           end: new Date(e.end_at).toISOString(),
+          allDay: e.all_day,
           location: e.location,
         })),
       };
@@ -161,11 +168,34 @@ export function buildTools(ctx: ToolContext): Record<string, ToolHandler> {
       if (at.getTime() <= Date.now()) {
         throw new Error("that time is in the past");
       }
-      const row = await createAdHocReminder(db, { userId, fireAt: at, note: message });
+      // Reminders ring the phone unless the user explicitly asked for a
+      // message only.
+      const alarm = args.alarm === undefined || String(args.alarm) !== "false";
+      const row = await createAdHocReminder(db, {
+        userId,
+        fireAt: at,
+        note: message,
+        alarm,
+      });
       return {
         created: row !== null,
         at: at.toISOString(),
         message,
+        alarm: row?.alarm ?? alarm,
+      };
+    },
+
+    connect_calendar: async (): Promise<ConnectCalendarResult> => {
+      if (!ctx.publicBaseUrl || !ctx.oauthStateSecret) {
+        throw new Error("calendar connection is not configured on this server");
+      }
+      return {
+        url: buildConnectUrl({
+          baseUrl: ctx.publicBaseUrl,
+          secret: ctx.oauthStateSecret,
+          uid: userId,
+        }),
+        expiresInMinutes: Math.round(CONNECT_TOKEN_TTL_MS / 60_000),
       };
     },
 

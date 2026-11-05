@@ -139,6 +139,58 @@ test("tool errors are reported, never thrown", async () => {
   assert.ok(res.reply.length > 0, "fallback still answers something");
 });
 
+test("all-day events are listed as All day, without a clock range", async () => {
+  const res = await runAgent(
+    makeDeps({
+      userMessage: "what's on today?",
+      tools: {
+        list_events: async () => ({
+          date: "2026-11-05",
+          events: [
+            {
+              title: "Board review",
+              start: "2026-11-05T09:00:00+01:00",
+              end: "2026-11-05T10:00:00+01:00",
+            },
+            {
+              title: "Public holiday",
+              start: "2026-11-04T23:00:00.000Z",
+              end: "2026-11-05T23:00:00.000Z",
+              allDay: true,
+            },
+          ],
+        }),
+      },
+    }),
+  );
+  assert.match(res.reply, /- 09:00–10:00 Board review/);
+  assert.match(res.reply, /- All day Public holiday/);
+  assert.ok(!/23:00/.test(res.reply), "no clock time leaks out of an all-day event");
+});
+
+test("'connect my calendar' asks the tool for a link", async () => {
+  const res = await runAgent(
+    makeDeps({
+      userMessage: "connect my calendar",
+      tools: {
+        connect_calendar: async () => ({
+          url: "https://ecos.example.com/auth/google?token=a.b",
+          expiresInMinutes: 30,
+        }),
+      },
+    }),
+  );
+  assert.equal(res.toolCalls[0]?.name, "connect_calendar");
+  assert.match(res.reply, /https:\/\/ecos\.example\.com\/auth\/google\?token=a\.b/);
+  assert.match(res.reply, /30 minutes/);
+});
+
+test("a connect request without a link degrades to an apology", async () => {
+  const res = await runAgent(makeDeps({ userMessage: "please reconnect my google calendar" }));
+  assert.match(res.reply, /couldn't create a calendar link/i);
+  assert.ok(res.reply.length > 0);
+});
+
 test("unrecognised input falls through to help text", async () => {
   const res = await runAgent(makeDeps({ userMessage: "quantum banana" }));
   assert.match(res.reply, /what's on today|didn't catch/i);

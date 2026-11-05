@@ -1,5 +1,6 @@
 import { createDb, runMigrations } from "@exec-assistant/db";
 import { createConfiguredSender } from "@exec-assistant/whatsapp";
+import { createConfiguredAlarm } from "./alarm.js";
 import { env } from "./config/env.js";
 import { materialize, seedDevCalendars, syncCalendars, type WorkerConfig } from "./sync.js";
 import { dispatchDue } from "./dispatch.js";
@@ -15,9 +16,18 @@ async function main(): Promise<void> {
     apiVersion: env.meta.apiVersion,
   });
 
+  const alarm = createConfiguredAlarm({
+    mode: env.alarm.mode,
+    twilio: env.twilio,
+    voice: env.alarm.voice,
+    language: env.alarm.language,
+    ringSeconds: env.alarm.ringSeconds,
+  });
+
   const cfg: WorkerConfig = {
     db,
     sender,
+    alarm,
     offsets: env.offsets,
     maxOffsetMinutes: env.maxOffsetMinutes,
     lookaheadDays: env.lookaheadDays,
@@ -27,6 +37,8 @@ async function main(): Promise<void> {
     devCalendar: env.devCalendar,
     google: env.google,
     template: env.reminderTemplate,
+    publicBaseUrl: env.publicBaseUrl,
+    oauthStateSecret: env.oauthStateSecret,
   };
 
   console.log("[worker] boot");
@@ -37,6 +49,9 @@ async function main(): Promise<void> {
   console.log(
     `[worker]   templates: ${env.reminderTemplate.name ?? "none (free-form text within the 24h window)"}`,
   );
+  console.log(
+    `[worker]   alarms:    ${alarm ? `${alarm.kind} (reminders flagged as alarms will ring)` : "off"}`,
+  );
 
   let running = false;
   async function tick(): Promise<void> {
@@ -46,10 +61,10 @@ async function main(): Promise<void> {
       const synced = await syncCalendars(cfg);
       const seeded = await seedDevCalendars(cfg);
       const ladder = await materialize(cfg);
-      const { sent, failed } = await dispatchDue(cfg);
-      if (synced || seeded || ladder || sent || failed) {
+      const { sent, failed, rung } = await dispatchDue(cfg);
+      if (synced || seeded || ladder || sent || failed || rung) {
         console.log(
-          `[worker] tick: synced=${synced} seeded=${seeded} ladder=${ladder} sent=${sent} failed=${failed}`,
+          `[worker] tick: synced=${synced} seeded=${seeded} ladder=${ladder} sent=${sent} failed=${failed} rung=${rung}`,
         );
       }
     } catch (err) {

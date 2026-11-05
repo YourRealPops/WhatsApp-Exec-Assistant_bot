@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { config as dotenvConfig } from "dotenv";
+import { MIN_OAUTH_STATE_SECRET_LENGTH } from "@exec-assistant/calendar";
 
 /**
  * Load env files up the directory chain: the monorepo root .env is canonical
@@ -58,6 +59,18 @@ const port = Number(process.env.PORT ?? 3000);
 const publicBaseUrl = optional("PUBLIC_BASE_URL") ?? `http://localhost:${port}`;
 const googleClientId = optional("GOOGLE_CLIENT_ID");
 const googleClientSecret = optional("GOOGLE_CLIENT_SECRET");
+const oauthStateSecret = optional("OAUTH_STATE_SECRET");
+
+// The connect/callback state is only trustworthy if it is signed, so Google
+// OAuth is unusable without a secret: fail at boot rather than at the first
+// consent screen.
+if (googleClientId && googleClientSecret) {
+  if (!oauthStateSecret || oauthStateSecret.length < MIN_OAUTH_STATE_SECRET_LENGTH) {
+    throw new Error(
+      `OAUTH_STATE_SECRET must be set to at least ${MIN_OAUTH_STATE_SECRET_LENGTH} characters when GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET are configured (generate one with: openssl rand -base64 32). See .env.example.`,
+    );
+  }
+}
 
 export const env = {
   port,
@@ -67,7 +80,7 @@ export const env = {
   },
   senderMode: (optional("SENDER") ?? "console") as "console" | "whatsapp",
   allowUnsignedWebhook: bool("ALLOW_UNSIGNED_WEBHOOK", false),
-  debugRoutes: bool("DEBUG_ROUTES", true),
+  debugRoutes: bool("DEBUG_ROUTES", false),
   defaultTimezone: optional("DEFAULT_TIMEZONE") ?? systemTimezone(),
   // Fixture calendar (standup / investor call / gym) until Google is connected.
   devCalendar: bool("DEV_CALENDAR", !googleClientId),
@@ -106,5 +119,6 @@ export const env = {
     clientSecret: googleClientSecret,
     redirectUri: `${publicBaseUrl}/auth/google/callback`,
     configured: !!(googleClientId && googleClientSecret),
+    stateSecret: oauthStateSecret,
   },
 };

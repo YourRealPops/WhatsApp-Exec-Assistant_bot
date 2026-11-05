@@ -1,5 +1,6 @@
 import type { AgentDeps, AgentResult, ToolExecution } from "./agent.js";
 import type {
+  ConnectCalendarResult,
   FindFreeTimeResult,
   ListEventsResult,
   ListRemindersResult,
@@ -12,6 +13,7 @@ const HELP = [
   '- "what\'s tomorrow"',
   '- "list my reminders"',
   '- "find a free 30 minute slot"',
+  '- "connect my calendar"',
   "Set LLM_API_KEY in .env to unlock full natural-language mode.",
 ].join("\n");
 
@@ -46,8 +48,12 @@ function formatEvents(res: ListEventsResult | null, tz: string): string {
   if (!res) return "I couldn't read the calendar just now — try again in a moment.";
   if (res.events.length === 0) return `Nothing on the calendar for ${res.date}.`;
   const lines = res.events.map((e) => {
-    const range = `${timeLabel(e.start, tz)}–${timeLabel(e.end, tz)}`;
-    return `- ${range} ${e.title}${e.location ? ` (${e.location})` : ""}`;
+    // All-day events are dates, so a clock range would be noise (and, before
+    // we anchored them locally, the wrong day).
+    const when = e.allDay
+      ? "All day"
+      : `${timeLabel(e.start, tz)}–${timeLabel(e.end, tz)}`;
+    return `- ${when} ${e.title}${e.location ? ` (${e.location})` : ""}`;
   });
   return `Schedule for ${res.date}:\n${lines.join("\n")}`;
 }
@@ -116,6 +122,16 @@ export async function runFallbackAgent(deps: AgentDeps): Promise<AgentResult> {
   if (/^(hi|hello|hey|yo|good (morning|afternoon|evening))\b/.test(t)) {
     return reply(
       "Hey! I'm your executive assistant on WhatsApp. Ask me things like:\n" + HELP,
+    );
+  }
+
+  if (/(connect|reconnect|relink)/.test(t) && /(calendar|google)/.test(t)) {
+    const res: ConnectCalendarResult | null = await call("connect_calendar", {});
+    if (!res?.url) {
+      return reply("I couldn't create a calendar link just now — try again in a moment.");
+    }
+    return reply(
+      `Open this link within ${res.expiresInMinutes} minutes to connect Google Calendar:\n${res.url}`,
     );
   }
 

@@ -66,6 +66,20 @@ function parseOffsets(raw: string | undefined): number[] {
 
 const offsets = parseOffsets(optional("REMINDER_OFFSETS"));
 
+/**
+ * Explicit ALARM_MODE wins; otherwise alarms go live as soon as Twilio
+ * credentials exist, mirroring how DEV_CALENDAR follows GOOGLE_CLIENT_ID.
+ */
+function alarmMode(): "off" | "console" | "twilio" {
+  const raw = optional("ALARM_MODE")?.toLowerCase();
+  if (raw === "off" || raw === "console" || raw === "twilio") return raw;
+  const hasCreds =
+    Boolean(optional("TWILIO_ACCOUNT_SID")) &&
+    Boolean(optional("TWILIO_FROM_NUMBER")) &&
+    Boolean(optional("TWILIO_AUTH_TOKEN") || optional("TWILIO_API_SECRET"));
+  return hasCreds ? "twilio" : "console";
+}
+
 export const env = {
   databaseUrl(): string {
     return requireEnv("DATABASE_URL");
@@ -84,6 +98,13 @@ export const env = {
     clientId: optional("GOOGLE_CLIENT_ID"),
     clientSecret: optional("GOOGLE_CLIENT_SECRET"),
   },
+  /**
+   * Reconnect links are minted here, so the worker needs the public URL and
+   * the state secret too. Both are optional: if either is missing the worker
+   * still syncs, but skips the proactive "reconnect" message.
+   */
+  publicBaseUrl: optional("PUBLIC_BASE_URL"),
+  oauthStateSecret: optional("OAUTH_STATE_SECRET"),
   meta: {
     apiVersion: optional("META_API_VERSION") ?? "v21.0",
     accessToken: optional("META_ACCESS_TOKEN"),
@@ -97,5 +118,22 @@ export const env = {
   reminderTemplate: {
     name: optional("REMINDER_TEMPLATE_NAME"),
     language: optional("REMINDER_TEMPLATE_LANGUAGE") ?? "en",
+  },
+  /**
+   * Reminder alarms: a reminder flagged as an alarm also rings the user's
+   * phone and reads the reminder out loud. ALARM_MODE=off disables it.
+   */
+  alarm: {
+    mode: alarmMode(),
+    voice: optional("ALARM_VOICE") ?? "Polly.Joanna",
+    language: optional("ALARM_LANGUAGE") ?? "en-US",
+    ringSeconds: num("ALARM_RING_SECONDS", 30),
+  },
+  twilio: {
+    accountSid: optional("TWILIO_ACCOUNT_SID"),
+    apiKey: optional("TWILIO_API_KEY"),
+    apiSecret: optional("TWILIO_API_SECRET"),
+    authToken: optional("TWILIO_AUTH_TOKEN"),
+    from: optional("TWILIO_FROM_NUMBER"),
   },
 };

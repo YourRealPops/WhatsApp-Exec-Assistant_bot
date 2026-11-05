@@ -4,6 +4,8 @@ export interface CalendarEvent {
   title: string;
   start: Date;
   end: Date;
+  /** Date-only event (no clock time); start/end are local midnight. */
+  allDay?: boolean;
   location?: string | null;
   description?: string | null;
   status: "confirmed" | "cancelled" | string;

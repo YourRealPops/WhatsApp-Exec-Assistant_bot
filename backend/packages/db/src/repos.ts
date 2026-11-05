@@ -30,7 +30,12 @@ export interface CalendarAccount {
   expires_at: Date | null;
   calendar_id: string;
   synced_at: Date | null;
+  /** Google rejected the grant; the account is paused until the user reconnects. */
+  reauth_required_at: Date | null;
   created_at: Date;
+  /** Joined from users by listAccountsDueSync, for reconnect messages. */
+  phone?: string | null;
+  timezone?: string | null;
 }
 
 export interface CalEvent {
@@ -43,6 +48,8 @@ export interface CalEvent {
   location: string | null;
   description: string | null;
   status: string;
+  /** Date-only event: start_at/end_at are local midnight, no reminder ladder. */
+  all_day: boolean;
   updated_at: Date;
 }
 
@@ -51,6 +58,7 @@ export interface EventInput {
   title: string;
   start: Date;
   end: Date;
+  allDay?: boolean;
   location?: string | null;
   description?: string | null;
   status?: string;
@@ -67,6 +75,11 @@ export interface Reminder {
   attempts: number;
   last_error: string | null;
   sent_at: Date | null;
+  /** Ring the user's phone for this reminder, not just message them. */
+  alarm: boolean;
+  called_at: Date | null;
+  call_sid: string | null;
+  call_error: string | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -169,7 +182,8 @@ export async function upsertCalendarAccount(
       refresh_token = coalesce(excluded.refresh_token, calendar_accounts.refresh_token),
       expires_at = excluded.expires_at,
       calendar_id = excluded.calendar_id,
-      synced_at = null
+      synced_at = null,
+      reauth_required_at = null
     returning *`;
   return rows[0] as unknown as CalendarAccount;
 }
@@ -183,16 +197,40 @@ export async function getCalendarAccount(
   return (rows[0] as unknown as CalendarAccount) ?? null;
 }
 
+/**
+ * Accounts whose grant still works and whose last sync is old enough.
+ * Accounts flagged for reauth are paused until the user reconnects, so a dead
+ * token can't hot-loop every tick.
+ */
 export async function listAccountsDueSync(
   db: Db,
   intervalMs: number
 ): Promise<CalendarAccount[]> {
   const cutoff = new Date(Date.now() - intervalMs);
   const rows = await db`
-    select * from calendar_accounts
-    where synced_at is null or synced_at < ${cutoff}
-    order by synced_at nulls first`;
+    select a.*, u.phone, u.timezone
+    from calendar_accounts a
+    join users u on u.id = a.user_id
+    where a.reauth_required_at is null
+      and (a.synced_at is null or a.synced_at < ${cutoff})
+    order by a.synced_at nulls first`;
   return rows as unknown as CalendarAccount[];
+}
+
+/**
+ * Pause an account whose grant Google rejected. Returns true only on the
+ * pending → flagged transition, so the user is messaged exactly once.
+ */
+export async function markReauthRequired(
+  db: Db,
+  accountId: string
+): Promise<boolean> {
+  const rows = await db`
+    update calendar_accounts
+    set reauth_required_at = now()
+    where id = ${accountId} and reauth_required_at is null
+    returning id`;
+  return rows.length > 0;
 }
 
 export async function markSynced(db: Db, accountId: string): Promise<void> {
@@ -223,16 +261,15 @@ export async function upsertEvents(
   for (const e of events) {
     const rows = await db`
       insert into events
-        (user_id, external_id, title, start_at, end_at, location, description, status, updated_at)
+        (user_id, external_id, title, start_at, end_at, all_day, location, description, status, updated_at)
       values
-        (${userId}, ${e.externalId}, ${e.title}, ${e.start}, ${e.end},
-         ${e.location ?? null}, ${e.description ?? null}, ${
-      e.status ?? "confirmed"
-    }, now())
+        (${userId}, ${e.externalId}, ${e.title}, ${e.start}, ${e.end}, ${e.allDay ?? false},
+         ${e.location ?? null}, ${e.description ?? null}, ${e.status ?? "confirmed"}, now())
       on conflict (user_id, external_id) do update set
         title = excluded.title,
         start_at = excluded.start_at,
         end_at = excluded.end_at,
+        all_day = excluded.all_day,
         location = excluded.location,
         description = excluded.description,
         status = excluded.status,
@@ -261,6 +298,47 @@ export async function listUpcomingEvents(
   return rows as unknown as CalEvent[];
 }
 
+/**
+ * After a complete fetch of the sync window: events Google did not return are
+ * gone, so cancel them and drop their unsent reminders. Only ever call this
+ * with the full list — a partial page would look like mass deletion.
+ *
+ * `dev:*` fixtures and assistant-created `local:*` events are not Google's to
+ * reconcile, so they are left alone.
+ */
+export async function reconcileMissingEvents(
+  db: Db,
+  userId: string,
+  opts: { from: Date; to: Date; seenExternalIds: string[] }
+): Promise<{ cancelled: number; remindersRemoved: number }> {
+  const rows = await db`
+    with gone as (
+      update events
+      set status = 'cancelled', updated_at = now()
+      where user_id = ${userId}
+        and start_at >= ${opts.from}
+        and start_at < ${opts.to}
+        and status <> 'cancelled'
+        and not (external_id = any(${opts.seenExternalIds}::text[]))
+        and external_id not like 'dev:%'
+        and external_id not like 'local:%'
+      returning id
+    ), dropped as (
+      delete from reminders
+      where event_id in (select id from gone)
+        and status = 'pending'
+      returning id
+    )
+    select
+      (select count(*)::int from gone) as cancelled,
+      (select count(*)::int from dropped) as reminders_removed`;
+  const row = rows[0] as unknown as {
+    cancelled: number;
+    reminders_removed: number;
+  };
+  return { cancelled: row.cancelled, remindersRemoved: row.reminders_removed };
+}
+
 // ---------------------------------------------------------------------------
 // Reminders
 // ---------------------------------------------------------------------------
@@ -272,10 +350,10 @@ export async function listUpcomingEvents(
  */
 export async function materializeReminders(
   db: Db,
-  event: { id: string; userId: string; startAt: Date },
+  event: { id: string; userId: string; startAt: Date; allDay?: boolean },
   offsets: number[]
 ): Promise<number> {
-  if (offsets.length === 0) return 0;
+  if (offsets.length === 0 || event.allDay) return 0;
   const rows = await db`
     insert into reminders (user_id, event_id, offset_minutes, fire_at)
     select ${event.userId}, ${event.id}, o.off, ${event.startAt}::timestamptz - make_interval(mins => o.off)
@@ -303,6 +381,7 @@ export async function materializeAllReminders(
     select e.user_id, e.id, o.off, e.start_at - make_interval(mins => o.off)
     from events e, unnest(${opts.offsets}::int[]) as o(off)
     where e.status = 'confirmed'
+      and e.all_day = false
       and e.start_at >= now() - make_interval(mins => ${opts.maxOffsetMinutes})
       and e.start_at < now() + make_interval(days => ${opts.lookaheadDays})
     on conflict (event_id, offset_minutes)
@@ -313,14 +392,19 @@ export async function materializeAllReminders(
   return rows.length;
 }
 
-/** One-off reminder not tied to a calendar event. Deduped on (user, time, note). */
+/**
+ * One-off reminder not tied to a calendar event. Deduped on (user, time, note).
+ * Rings the phone by default — a reminder the user set by hand should alert.
+ */
 export async function createAdHocReminder(
   db: Db,
-  input: { userId: string; fireAt: Date; note: string }
+  input: { userId: string; fireAt: Date; note: string; alarm?: boolean }
 ): Promise<Reminder | null> {
   const rows = await db`
-    insert into reminders (user_id, event_id, offset_minutes, fire_at, note)
-    select ${input.userId}, null, null, ${input.fireAt}, ${input.note}
+    insert into reminders (user_id, event_id, offset_minutes, fire_at, note, alarm)
+    select ${input.userId}, null, null, ${input.fireAt}, ${input.note}, ${
+    input.alarm ?? true
+  }
     where not exists (
       select 1 from reminders r
       where r.user_id = ${input.userId}
@@ -375,6 +459,30 @@ export async function markReminderSent(db: Db, id: string): Promise<void> {
   await db`
     update reminders
     set status = 'sent', sent_at = now(), last_error = null, updated_at = now()
+    where id = ${id}`;
+}
+
+/** A reminder's alarm call connected/started; the provider call id is kept for tracing. */
+export async function markReminderCalled(
+  db: Db,
+  id: string,
+  sid: string
+): Promise<void> {
+  await db`
+    update reminders
+    set called_at = now(), call_sid = ${sid}, call_error = null, updated_at = now()
+    where id = ${id}`;
+}
+
+/** The alarm call never went out. Best-effort: the message may still have landed. */
+export async function markReminderCallFailed(
+  db: Db,
+  id: string,
+  error: string
+): Promise<void> {
+  await db`
+    update reminders
+    set call_error = ${error}, updated_at = now()
     where id = ${id}`;
 }
 

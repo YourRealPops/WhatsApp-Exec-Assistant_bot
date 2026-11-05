@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import {
   ensureUser,
+  getCalendarAccount,
   getUserById,
   listHistory,
   saveMessage,
   type Db,
 } from "@exec-assistant/db";
+import { buildConnectUrl, reconnectNotice } from "@exec-assistant/calendar";
 import {
   buildSystemPrompt,
   runAgent,
@@ -22,6 +24,35 @@ export interface PipelineDeps {
   llm?: LlmConfig | null;
   devCalendar: boolean;
   defaultTimezone: string;
+  /** Both needed to append a reconnect link to a reply. */
+  publicBaseUrl?: string;
+  oauthStateSecret?: string;
+}
+
+/**
+ * A flagged calendar account cannot sync, and a proactive message may fall
+ * outside the 24h window — so the user's next reply carries the link instead.
+ * One line, and never a reason to fail the turn.
+ */
+async function withReconnectNotice(
+  deps: PipelineDeps,
+  userId: string,
+  reply: string,
+): Promise<string> {
+  if (!deps.publicBaseUrl || !deps.oauthStateSecret) return reply;
+  try {
+    const account = await getCalendarAccount(deps.db, userId);
+    if (!account?.reauth_required_at) return reply;
+    const link = buildConnectUrl({
+      baseUrl: deps.publicBaseUrl,
+      secret: deps.oauthStateSecret,
+      uid: userId,
+    });
+    return `${reply}\n\n${reconnectNotice(link)}`;
+  } catch (err) {
+    console.error("[pipeline] reconnect notice failed:", err);
+    return reply;
+  }
 }
 
 /** Handle each parsed webhook message; one failure never blocks the rest. */
@@ -98,6 +129,8 @@ export async function handleUserText(
     userId: opts.userId,
     timezone,
     devCalendar: deps.devCalendar,
+    publicBaseUrl: deps.publicBaseUrl,
+    oauthStateSecret: deps.oauthStateSecret,
   });
 
   const result = await runAgent({
@@ -113,16 +146,18 @@ export async function handleUserText(
       ),
   });
 
+  const reply = await withReconnectNotice(deps, opts.userId, result.reply);
+
   await saveMessage(deps.db, {
     id: `out:${randomUUID()}`,
     userId: opts.userId,
     direction: "outbound",
-    body: result.reply,
+    body: reply,
   });
 
-  console.log(`[pipeline] → ${opts.phone} (${result.mode}): ${result.reply}`);
-  await safeSend(deps, opts.phone, result.reply);
-  return result;
+  console.log(`[pipeline] → ${opts.phone} (${result.mode}): ${reply}`);
+  await safeSend(deps, opts.phone, reply);
+  return { ...result, reply };
 }
 
 async function safeSend(deps: PipelineDeps, to: string, text: string): Promise<void> {

@@ -1,10 +1,15 @@
-import { Router } from "express";
+import { Router, type Response } from "express";
 import {
   getUserById,
   upsertCalendarAccount,
   type Db,
 } from "@exec-assistant/db";
-import { buildAuthUrl, exchangeCode } from "@exec-assistant/calendar";
+import {
+  buildAuthUrl,
+  exchangeCode,
+  signState,
+  verifyState,
+} from "@exec-assistant/calendar";
 
 export interface AuthConfig {
   db: Db;
@@ -12,6 +17,10 @@ export interface AuthConfig {
   clientSecret?: string;
   redirectUri: string;
   configured: boolean;
+  /** HMAC key for signed connect links and OAuth state. Required when configured. */
+  stateSecret?: string;
+  /** Keeps the legacy raw `?user=<id>` link for local debugging only. */
+  debugRoutes?: boolean;
 }
 
 function escapeHtml(value: string): string {
@@ -22,13 +31,30 @@ function escapeHtml(value: string): string {
     .replace(/"/g, "&quot;");
 }
 
+/**
+ * One generic answer for tampered, expired, wrong-purpose and missing tokens:
+ * telling them apart only helps someone forging one.
+ */
+function badLink(res: Response): void {
+  res
+    .status(400)
+    .type("text/plain")
+    .send(
+      "This calendar link is invalid or has expired — ask me for a new one in WhatsApp.",
+    );
+}
+
 export function authRouter(cfg: AuthConfig): Router {
   const router = Router();
 
-  // Step 1: send the user's browser to Google's consent screen.
-  // state carries the user id (a UUID) so the callback can attribute tokens.
+  // Step 1: verify the signed connect token, then send the browser to Google
+  // with a fresh, short-lived state of its own.
   router.get("/auth/google", async (req, res) => {
-    if (!cfg.configured || !cfg.clientId || !cfg.clientSecret) {
+    const clientId = cfg.clientId;
+    const clientSecret = cfg.clientSecret;
+    const secret = cfg.stateSecret;
+
+    if (!cfg.configured || !clientId || !clientSecret) {
       return res
         .status(400)
         .type("text/plain")
@@ -36,34 +62,55 @@ export function authRouter(cfg: AuthConfig): Router {
           "Google OAuth is not configured — set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET (see .env.example).",
         );
     }
-    const userId = String(req.query.user ?? "");
-    if (!userId) return res.status(400).type("text/plain").send("missing ?user=");
+    if (!secret) {
+      return res
+        .status(500)
+        .type("text/plain")
+        .send("OAUTH_STATE_SECRET is not configured — calendar links cannot be signed.");
+    }
+
+    const token = typeof req.query.token === "string" ? req.query.token : "";
+    const verified = token
+      ? verifyState({ secret, token, purpose: "connect" })
+      : null;
+    // The old raw `?user=` link survives only while debug routes are on.
+    const rawUser =
+      !verified && cfg.debugRoutes ? String(req.query.user ?? "") : "";
+    const userId = verified?.uid ?? rawUser;
+    if (!userId) return badLink(res);
+
     const user = await getUserById(cfg.db, userId);
-    if (!user) return res.status(404).type("text/plain").send("unknown user");
+    if (!user) return badLink(res);
 
     res.redirect(
       buildAuthUrl({
-        clientId: cfg.clientId,
+        clientId,
         redirectUri: cfg.redirectUri,
-        state: user.id,
+        state: signState({ secret, uid: user.id, purpose: "oauth" }),
       }),
     );
   });
 
-  // Step 2: exchange the code, persist the tokens, confirm in the browser.
+  // Step 2: verify the state we minted, exchange the code, persist the tokens.
   router.get("/auth/google/callback", async (req, res) => {
     try {
+      const clientId = cfg.clientId;
+      const clientSecret = cfg.clientSecret;
+      const secret = cfg.stateSecret;
       const code = String(req.query.code ?? "");
       const state = String(req.query.state ?? "");
-      if (!code || !state) {
-        return res.status(400).type("text/plain").send("missing code or state");
+      if (!code || !state || !secret || !clientId || !clientSecret) {
+        return badLink(res);
       }
-      const user = await getUserById(cfg.db, state);
-      if (!user) return res.status(404).type("text/plain").send("unknown user");
+
+      const payload = verifyState({ secret, token: state, purpose: "oauth" });
+      if (!payload) return badLink(res);
+      const user = await getUserById(cfg.db, payload.uid);
+      if (!user) return badLink(res);
 
       const tokens = await exchangeCode({
-        clientId: cfg.clientId!,
-        clientSecret: cfg.clientSecret!,
+        clientId,
+        clientSecret,
         redirectUri: cfg.redirectUri,
         code,
       });

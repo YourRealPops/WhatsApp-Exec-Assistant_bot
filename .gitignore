@@ -4,6 +4,9 @@ dist/
 .env.example
 *.log
 
+# ...but the committed template is not a secret
+!backend/.env.example
+
 # Next.js / frontend
 .next/
 out/

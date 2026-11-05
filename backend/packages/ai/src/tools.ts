@@ -71,15 +71,29 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "set_reminder",
       description:
-        "Set a one-off reminder at an absolute time (for things not on the calendar).",
+        "Set a one-off reminder at an absolute time (for things not on the calendar). By default the reminder also rings the user's phone as an alarm; pass alarm=false when they only want a message.",
       parameters: {
         type: "object",
         properties: {
           at: { type: "string", description: "ISO 8601 timestamp with offset." },
           message: { type: "string", description: "What to remind about." },
+          alarm: {
+            type: "boolean",
+            description:
+              "Ring the phone with a spoken reminder. Defaults to true; false sends the WhatsApp message only.",
+          },
         },
         required: ["at", "message"],
       },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "connect_calendar",
+      description:
+        "Get a link the user can open to connect or reconnect Google Calendar. Use when they ask to connect their calendar, or when their calendar stopped syncing.",
+      parameters: { type: "object", properties: {}, required: [] },
     },
   },
   {
@@ -107,6 +121,8 @@ export interface EventSlot {
   title: string;
   start: string;
   end: string;
+  /** Date-only event: show "All day" instead of a clock time. */
+  allDay?: boolean;
   location?: string | null;
 }
 
@@ -131,6 +147,13 @@ export interface SetReminderResult {
   created: boolean;
   at: string;
   message: string;
+  /** Whether the reminder will also ring the phone as an alarm. */
+  alarm: boolean;
+}
+
+export interface ConnectCalendarResult {
+  url: string;
+  expiresInMinutes: number;
 }
 
 export interface ListRemindersResult {

@@ -75,6 +75,28 @@ const MIGRATIONS: string[] = [
   create unique index if not exists reminders_adhoc_uniq
     on reminders (user_id, fire_at, note) where event_id is null;
   `,
+  `
+  -- Reminder alarms: ring the user's phone with a spoken reminder in addition
+  -- to the WhatsApp message. The alarm flag marks which rows get a call; the
+  -- ladder stays message-only unless a row opts in.
+  alter table reminders
+    add column if not exists alarm boolean not null default false,
+    add column if not exists called_at timestamptz,
+    add column if not exists call_sid text,
+    add column if not exists call_error text;
+  `,
+  `
+  -- A dead Google grant must become visible: the worker flags the account,
+  -- stops syncing it and asks the user to reconnect. Cleared on reconnect.
+  alter table calendar_accounts
+    add column if not exists reauth_required_at timestamptz;
+  `,
+  `
+  -- All-day events are dates, not instants: keep them off the 15/10/5/0
+  -- ladder and let lists print "All day" instead of a clock time.
+  alter table events
+    add column if not exists all_day boolean not null default false;
+  `,
 ];
 
 export async function runMigrations(db: Db): Promise<void> {
