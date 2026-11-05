@@ -5,11 +5,13 @@ import {
   getUserById,
   listHistory,
   saveMessage,
+  setUserProfile,
   type Db,
 } from "@exec-assistant/db";
 import { buildConnectUrl, reconnectNotice } from "@exec-assistant/calendar";
 import {
   buildSystemPrompt,
+  parseProfile,
   runAgent,
   type AgentResult,
   type LlmConfig,
@@ -17,6 +19,15 @@ import {
 } from "@exec-assistant/ai";
 import type { InboundMessage, Sender } from "@exec-assistant/whatsapp";
 import { buildTools, ensureDevEvents } from "./tools.js";
+
+/**
+ * The first thing a brand-new user ever hears from ECOS. It is fixed copy on
+ * purpose: it introduces the assistant and asks for name + designation, so the
+ * opening turn is a handshake rather than an answer to whatever they happened
+ * to type first.
+ */
+export const FIRST_CONTACT_GREETING =
+  "Hello, I am your new e Chief of Staff, can I know your name and designation?";
 
 export interface PipelineDeps {
   db: Db;
@@ -112,11 +123,42 @@ export async function handleUserText(
     excludeMessageId?: string;
   },
 ): Promise<AgentResult> {
-  const user = await getUserById(deps.db, opts.userId);
+  let user = await getUserById(deps.db, opts.userId);
   const timezone = user?.timezone ?? deps.defaultTimezone;
 
   const historyRows = await listHistory(deps.db, opts.userId, 20);
   const prior = historyRows.filter((m) => m.id !== opts.excludeMessageId);
+
+  // First contact: ECOS speaks first, with its introduction. No agent turn is
+  // spent on it — the user's reply (name, designation) is the first real turn,
+  // and it arrives with the greeting already in history.
+  if (prior.length === 0) {
+    await saveMessage(deps.db, {
+      id: `out:${randomUUID()}`,
+      userId: opts.userId,
+      direction: "outbound",
+      body: FIRST_CONTACT_GREETING,
+    });
+    console.log(`[pipeline] → ${opts.phone} (onboarding): ${FIRST_CONTACT_GREETING}`);
+    await safeSend(deps, opts.phone, FIRST_CONTACT_GREETING);
+    return { reply: FIRST_CONTACT_GREETING, toolCalls: [], mode: "onboarding" };
+  }
+
+  // The greeting asked for name and designation, so the reply to it is the
+  // profile answer. Capture it here rather than relying on the model: with no
+  // LLM key the fallback would otherwise drop the name on the floor.
+  const lastTurn = prior[prior.length - 1];
+  if (lastTurn?.direction === "outbound" && lastTurn.body === FIRST_CONTACT_GREETING) {
+    const profile = parseProfile(opts.text);
+    if (profile) {
+      const saved = await setUserProfile(deps.db, opts.userId, {
+        name: profile.name,
+        designation: profile.designation,
+      });
+      if (saved) user = saved;
+    }
+  }
+
   const history: LlmMessage[] = prior.map((m) => ({
     role: m.direction === "inbound" ? "user" : "assistant",
     content: m.body,
@@ -135,7 +177,11 @@ export async function handleUserText(
 
   const result = await runAgent({
     llm: deps.llm,
-    systemPrompt: buildSystemPrompt({ timezone, userName: user?.name }),
+    systemPrompt: buildSystemPrompt({
+      timezone,
+      userName: user?.name,
+      userDesignation: user?.designation,
+    }),
     timezone,
     history,
     userMessage: opts.text,

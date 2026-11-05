@@ -8,6 +8,8 @@ export interface User {
   id: string;
   phone: string;
   name: string | null;
+  /** Job title/role the user gave ECOS, e.g. "CTO". */
+  designation: string | null;
   timezone: string;
   created_at: Date;
 }
@@ -113,6 +115,25 @@ export async function getUserByPhone(
   phone: string
 ): Promise<User | null> {
   const rows = await db`select * from users where phone = ${phone}`;
+  return (rows[0] as unknown as User) ?? null;
+}
+
+/**
+ * Sets or edits the profile. An omitted field is left untouched, so a user can
+ * change only their designation (or only their name) without wiping the other
+ * — and a stored name survives until they explicitly replace it.
+ */
+export async function setUserProfile(
+  db: Db,
+  userId: string,
+  input: { name?: string | null; designation?: string | null }
+): Promise<User | null> {
+  const rows = await db`
+    update users set
+      name = coalesce(${input.name ?? null}, name),
+      designation = coalesce(${input.designation ?? null}, designation)
+    where id = ${userId}
+    returning *`;
   return (rows[0] as unknown as User) ?? null;
 }
 

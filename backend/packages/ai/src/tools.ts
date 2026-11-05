@@ -104,6 +104,28 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       parameters: { type: "object", properties: {}, required: [] },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "save_profile",
+      description:
+        "Save or edit the user's name and designation on their profile. Call it when they tell you their name or role, or ask to be called something else. Pass only what changed — an omitted field keeps its stored value.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            description: "The name the user wants to be addressed by.",
+          },
+          designation: {
+            type: "string",
+            description: "Their role or job title, e.g. 'CTO at Analytic Engines'.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
 ];
 
 export const TOOL_NAMES = TOOL_DEFINITIONS.map((t) => t.function.name);
@@ -154,6 +176,12 @@ export interface SetReminderResult {
 export interface ConnectCalendarResult {
   url: string;
   expiresInMinutes: number;
+}
+
+export interface SaveProfileResult {
+  /** Stored name — null when the user has never given one. */
+  name: string | null;
+  designation: string | null;
 }
 
 export interface ListRemindersResult {

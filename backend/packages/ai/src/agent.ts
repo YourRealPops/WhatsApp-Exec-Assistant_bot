@@ -36,13 +36,15 @@ export interface AgentDeps {
 export interface AgentResult {
   reply: string;
   toolCalls: ToolExecution[];
-  mode: "llm" | "fallback";
+  /** "onboarding" is the fixed first-contact introduction, not an agent reply. */
+  mode: "llm" | "fallback" | "onboarding";
 }
 
 /** System prompt with the date/time context baked in. */
 export function buildSystemPrompt(opts: {
   timezone: string;
   userName?: string | null;
+  userDesignation?: string | null;
   now?: Date;
 }): string {
   const now = opts.now ?? new Date();
@@ -58,9 +60,14 @@ export function buildSystemPrompt(opts: {
     minute: "2-digit",
     hour12: false,
   });
-  const who = opts.userName ? `You are assisting ${opts.userName}.` : "";
+  const who = opts.userName
+    ? `You are assisting ${opts.userName}${
+        opts.userDesignation ? `, ${opts.userDesignation}` : ""
+      }. Address them as ${opts.userName}.`
+    : "You do not know the user's name yet — ask for it once, and call save_profile when they answer.";
   return [
     who,
+    `When the user states or changes their name or designation, call save_profile and then use the new name. Never address them by any other name once it is stored.`,
     `You are an executive assistant reached through WhatsApp.`,
     `Current date in the user's timezone (${tz}): ${date}, ${time}.`,
     `Reply in short plain text — WhatsApp renders no markdown: no headings, no asterisks, no bold.`,

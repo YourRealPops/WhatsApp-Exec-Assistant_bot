@@ -97,6 +97,11 @@ const MIGRATIONS: string[] = [
   alter table events
     add column if not exists all_day boolean not null default false;
   `,
+  `
+  -- ECOS opens with "can I know your name and designation?": keep both so
+  -- every later reply can address the user by name until they change it.
+  alter table users add column if not exists designation text;
+  `,
 ];
 
 export async function runMigrations(db: Db): Promise<void> {

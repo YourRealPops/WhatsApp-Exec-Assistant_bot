@@ -202,3 +202,43 @@ test("system prompt carries the timezone and date", () => {
   assert.match(prompt, /Africa\/Lagos/);
   assert.match(prompt, /Current date/);
 });
+
+test("a name change is saved and acknowledged without an LLM", async () => {
+  let saved: Record<string, unknown> = {};
+  const res = await runAgent(
+    makeDeps({
+      userMessage: "call me Ada, CTO",
+      tools: {
+        save_profile: async (args) => {
+          saved = args;
+          return { name: "Ada", designation: "CTO" };
+        },
+      },
+    }),
+  );
+  assert.equal(res.toolCalls[0]?.name, "save_profile");
+  assert.deepEqual(saved, { name: "Ada", designation: "CTO" });
+  assert.match(res.reply, /I'll call you Ada/);
+});
+
+test("a profile statement without the tool still answers", async () => {
+  const res = await runAgent(makeDeps({ userMessage: "my name is Ada" }));
+  assert.ok(res.reply.length > 0);
+});
+
+test("the prompt addresses a known user by name, never anyone else", () => {
+  const prompt = buildSystemPrompt({
+    timezone: TZ,
+    userName: "Ada",
+    userDesignation: "CTO",
+    now: new Date(),
+  });
+  assert.match(prompt, /You are assisting Ada, CTO\./);
+  assert.match(prompt, /Address them as Ada\./);
+  assert.match(prompt, /call save_profile/);
+});
+
+test("the prompt asks an unknown user for a name exactly once", () => {
+  const prompt = buildSystemPrompt({ timezone: TZ, now: new Date() });
+  assert.match(prompt, /do not know the user's name/i);
+});

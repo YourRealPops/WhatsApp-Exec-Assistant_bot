@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { createDb, type Db } from "./client.js";
 import { runMigrations } from "./migrations.js";
-import { ensureUser, saveMessage, listHistory, getUserByPhone } from "./repos.js";
+import {
+  ensureUser,
+  saveMessage,
+  listHistory,
+  getUserByPhone,
+  setUserProfile,
+} from "./repos.js";
 
 const url = process.env.DATABASE_URL;
 const skip = url ? false : "DATABASE_URL not set — skipping DB integration test";
@@ -38,6 +44,20 @@ test("ensureUser is idempotent", { skip }, async () => {
   assert.equal(a.id, b.id, "same phone must resolve to the same user");
   const found = await getUserByPhone(d, phone);
   assert.equal(found?.timezone, "Africa/Lagos", "existing timezone must not be overwritten");
+});
+
+test("setUserProfile stores name and designation, and a partial edit keeps the other", { skip }, async () => {
+  const d = getDb();
+  const saved = await setUserProfile(d, userId, {
+    name: "Ada Lovelace",
+    designation: "CTO",
+  });
+  assert.equal(saved?.name, "Ada Lovelace");
+  assert.equal(saved?.designation, "CTO");
+
+  const renamed = await setUserProfile(d, userId, { name: "Ada King" });
+  assert.equal(renamed?.name, "Ada King", "the new name replaces the old one");
+  assert.equal(renamed?.designation, "CTO", "an omitted field is left alone");
 });
 
 test("saveMessage dedupes on Meta's message id (webhook redelivery)", { skip }, async () => {

@@ -4,8 +4,10 @@ import type {
   FindFreeTimeResult,
   ListEventsResult,
   ListRemindersResult,
+  SaveProfileResult,
 } from "./tools.js";
 import { safeTimezone } from "./agent.js";
+import { parseProfile } from "./profile.js";
 
 const HELP = [
   "I can help with your schedule. Try:",
@@ -118,6 +120,18 @@ export async function runFallbackAgent(deps: AgentDeps): Promise<AgentResult> {
     toolCalls: executions,
     mode: "fallback",
   });
+
+  // Profile statements without an LLM: "my name is Ada", "call me Ada, CTO".
+  const profile = parseProfile(text);
+  if (profile?.explicit) {
+    const saved = (await call("save_profile", {
+      name: profile.name,
+      ...(profile.designation ? { designation: profile.designation } : {}),
+    })) as SaveProfileResult | null;
+    if (saved) {
+      return reply(`Noted — I'll call you ${saved.name ?? profile.name}.`);
+    }
+  }
 
   if (/^(hi|hello|hey|yo|good (morning|afternoon|evening))\b/.test(t)) {
     return reply(

@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/fallback.test.ts"
+    "test": "node --import tsx --test src/fallback.test.ts src/profile.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.5.0",

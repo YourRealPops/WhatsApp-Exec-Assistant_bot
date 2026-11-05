@@ -4,6 +4,7 @@ import {
   getCalendarAccount,
   listUpcomingEvents,
   listUpcomingReminders,
+  setUserProfile,
   upsertEvents,
   type Db,
 } from "@exec-assistant/db";
@@ -22,6 +23,7 @@ import type {
   FindFreeTimeResult,
   ListEventsResult,
   ListRemindersResult,
+  SaveProfileResult,
   SetReminderResult,
   ToolHandler,
 } from "@exec-assistant/ai";
@@ -196,6 +198,20 @@ export function buildTools(ctx: ToolContext): Record<string, ToolHandler> {
           uid: userId,
         }),
         expiresInMinutes: Math.round(CONNECT_TOKEN_TTL_MS / 60_000),
+      };
+    },
+
+    save_profile: async (args): Promise<SaveProfileResult> => {
+      const name = typeof args.name === "string" ? args.name.trim() : "";
+      const designation =
+        typeof args.designation === "string" ? args.designation.trim() : "";
+      const saved = await setUserProfile(db, userId, {
+        name: name || null,
+        designation: designation || null,
+      });
+      return {
+        name: saved?.name ?? null,
+        designation: saved?.designation ?? null,
       };
     },
 
