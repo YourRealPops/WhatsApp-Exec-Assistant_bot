@@ -108,6 +108,13 @@ export const env = {
     tryPhoneNumberId: () => optional("META_PHONE_NUMBER_ID"),
   },
 
+  // The opener is free-form text inside the 24h window and this approved
+  // template outside it (see intro.ts).
+  intro: {
+    templateName: optional("INTRO_TEMPLATE_NAME"),
+    templateLanguage: optional("INTRO_TEMPLATE_LANGUAGE") ?? "en",
+  },
+
   llm: {
     baseUrl: optional("LLM_BASE_URL") ?? "https://api.openai.com/v1",
     apiKey: optional("LLM_API_KEY") ?? "",

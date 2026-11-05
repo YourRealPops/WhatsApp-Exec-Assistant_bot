@@ -6,9 +6,10 @@
   "scripts": {
     "start:dev": "tsx watch src/index.ts",
     "cli": "tsx src/cli.ts",
+    "intro": "tsx src/intro.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/pipeline.test.ts src/routes/auth.test.ts",
+    "test": "node --import tsx --test src/pipeline.test.ts src/intro.test.ts src/routes/auth.test.ts",
     "start": "node dist/index.js",
     "lint": "eslint src --ext .ts"
   },

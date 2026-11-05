@@ -66,6 +66,33 @@ async function withReconnectNotice(
   }
 }
 
+/**
+ * Delivers ECOS's introduction and records it, so the user's reply is read as
+ * the answer to it (name + designation). This is the only place the opener is
+ * sent: the first-contact branch below, the local CLI at startup, and
+ * `pnpm intro` for outbound outreach all go through here.
+ *
+ * Delivery happens before the record is written: if the send fails, the
+ * conversation stays empty and the user is introduced on their next message
+ * instead of being silently treated as already greeted.
+ */
+export async function sendFirstContact(
+  deps: Pick<PipelineDeps, "db" | "sender">,
+  opts: { userId: string; phone: string; deliver?: () => Promise<unknown> },
+): Promise<AgentResult> {
+  if (opts.deliver) await opts.deliver();
+  else await safeSend(deps, opts.phone, FIRST_CONTACT_GREETING);
+
+  await saveMessage(deps.db, {
+    id: `out:${randomUUID()}`,
+    userId: opts.userId,
+    direction: "outbound",
+    body: FIRST_CONTACT_GREETING,
+  });
+  console.log(`[pipeline] → ${opts.phone} (onboarding): ${FIRST_CONTACT_GREETING}`);
+  return { reply: FIRST_CONTACT_GREETING, toolCalls: [], mode: "onboarding" };
+}
+
 /** Handle each parsed webhook message; one failure never blocks the rest. */
 export async function processInbound(
   deps: PipelineDeps,
@@ -132,17 +159,7 @@ export async function handleUserText(
   // First contact: ECOS speaks first, with its introduction. No agent turn is
   // spent on it — the user's reply (name, designation) is the first real turn,
   // and it arrives with the greeting already in history.
-  if (prior.length === 0) {
-    await saveMessage(deps.db, {
-      id: `out:${randomUUID()}`,
-      userId: opts.userId,
-      direction: "outbound",
-      body: FIRST_CONTACT_GREETING,
-    });
-    console.log(`[pipeline] → ${opts.phone} (onboarding): ${FIRST_CONTACT_GREETING}`);
-    await safeSend(deps, opts.phone, FIRST_CONTACT_GREETING);
-    return { reply: FIRST_CONTACT_GREETING, toolCalls: [], mode: "onboarding" };
-  }
+  if (prior.length === 0) return sendFirstContact(deps, opts);
 
   // The greeting asked for name and designation, so the reply to it is the
   // profile answer. Capture it here rather than relying on the model: with no
@@ -206,7 +223,11 @@ export async function handleUserText(
   return { ...result, reply };
 }
 
-async function safeSend(deps: PipelineDeps, to: string, text: string): Promise<void> {
+async function safeSend(
+  deps: Pick<PipelineDeps, "sender">,
+  to: string,
+  text: string,
+): Promise<void> {
   try {
     await deps.sender.sendText(to, text);
   } catch (err) {

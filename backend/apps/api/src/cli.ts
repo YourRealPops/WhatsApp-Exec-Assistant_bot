@@ -1,9 +1,15 @@
 import { randomUUID } from "node:crypto";
 import readline from "node:readline/promises";
-import { createDb, ensureUser, runMigrations, saveMessage } from "@exec-assistant/db";
+import {
+  createDb,
+  ensureUser,
+  listHistory,
+  runMigrations,
+  saveMessage,
+} from "@exec-assistant/db";
 import type { Sender } from "@exec-assistant/whatsapp";
 import { env } from "./config/env.js";
-import { handleUserText, type PipelineDeps } from "./pipeline.js";
+import { handleUserText, sendFirstContact, type PipelineDeps } from "./pipeline.js";
 
 /**
  * Local REPL for the assistant — exercises the exact same pipeline as the
@@ -51,6 +57,12 @@ async function main(): Promise<void> {
   console.log(
     `  llm: ${env.llm.apiKey ? `${env.llm.model}` : "off (rule-based fallback)"} | calendar: ${env.devCalendar ? "dev fixtures" : "google"} | /quit to exit\n`,
   );
+
+  // Same as WhatsApp: a fresh conversation is opened by ECOS, so the intro
+  // arrives before the first "you>" prompt.
+  if ((await listHistory(db, user.id, 1)).length === 0) {
+    await sendFirstContact(deps, { userId: user.id, phone });
+  }
 
   const rl = readline.createInterface({
     input: process.stdin,
