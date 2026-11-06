@@ -19,14 +19,25 @@ import {
 } from "@exec-assistant/calendar";
 import type {
   ConnectCalendarResult,
+  ConnectionStatusResult,
   CreateEventResult,
+  DisconnectResult,
   FindFreeTimeResult,
   ListEventsResult,
   ListRemindersResult,
+  ManageConnectionsResult,
+  ProposeEventChangeResult,
   SaveProfileResult,
   SetReminderResult,
   ToolHandler,
 } from "@exec-assistant/ai";
+import type { GoogleConfig } from "./calendar-access.js";
+import {
+  connectionStatus,
+  disconnectCalendar,
+  manageConnections,
+} from "./connections.js";
+import { proposeEventChange } from "./proposals.js";
 
 export interface ToolContext {
   db: Db;
@@ -36,6 +47,15 @@ export interface ToolContext {
   /** Needed to mint a connect link; without them the tool fails politely. */
   publicBaseUrl?: string;
   oauthStateSecret?: string;
+  /** Google credentials + token key; absent means calendar writes are off. */
+  google?: GoogleConfig | null;
+  /** APPROVAL_TTL_MINUTES, applied to every proposal. */
+  approvalTtlMinutes?: number;
+  /** The user's message for this turn — the disconnect confirmation reads it. */
+  currentMessage?: string;
+  /** True when calendar writes are off; events created here are local-only
+   *  until Google is connected. */
+  needsConnect: boolean;
 }
 
 const WORKDAY_START = "09:00";
@@ -72,7 +92,7 @@ export async function ensureDevEvents(
 }
 
 export function buildTools(ctx: ToolContext): Record<string, ToolHandler> {
-  const { db, userId, timezone: tz } = ctx;
+  const { db, userId, timezone: tz, needsConnect } = ctx;
 
   return {
     list_events: async (args): Promise<ListEventsResult> => {
@@ -85,6 +105,7 @@ export function buildTools(ctx: ToolContext): Record<string, ToolHandler> {
       return {
         date: dateStr,
         events: events.map((e) => ({
+          id: e.external_id,
           title: e.title,
           start: new Date(e.start_at).toISOString(),
           end: new Date(e.end_at).toISOString(),
@@ -145,21 +166,30 @@ export function buildTools(ctx: ToolContext): Record<string, ToolHandler> {
       if (end.getTime() <= start.getTime()) {
         throw new Error("end must be after start");
       }
-      const [created] = await upsertEvents(db, userId, [
-        {
-          externalId: `local:${randomUUID()}`,
+      // Make `created` truthful: an upsert would otherwise claim creation for
+      // an event that already lived here. Ask first, then insert only if the
+      // event is genuinely new.
+      const externalId = `local:${randomUUID()}`;
+      const [dup] = await db`select * from events where user_id = ${userId} and external_id = ${externalId}`;
+      if (dup) {
+        return {
+          created: false,
           title,
-          start,
-          end,
-          location: typeof args.location === "string" ? args.location : null,
-          description: "created by the assistant",
-        },
-      ]);
+          start: new Date(dup.start_at).toISOString(),
+          end: new Date(dup.end_at).toISOString(),
+          needsConnect,
+        };
+      }
+      const [row] = await db`
+        insert into events (user_id, external_id, title, start_at, end_at, location, description, status, updated_at)
+        values (${userId}, ${externalId}, ${title}, ${start}, ${end}, ${typeof args.location === "string" ? args.location : null}, "created by the assistant", "confirmed", now())
+      `;
       return {
         created: true,
         title,
-        start: new Date(created.start_at).toISOString(),
-        end: new Date(created.end_at).toISOString(),
+        start: new Date(row.start_at).toISOString(),
+        end: new Date(row.end_at).toISOString(),
+        needsConnect,
       };
     },
 
@@ -214,6 +244,51 @@ export function buildTools(ctx: ToolContext): Record<string, ToolHandler> {
         designation: saved?.designation ?? null,
       };
     },
+
+    connection_status: async (): Promise<ConnectionStatusResult> =>
+      connectionStatus({
+        db,
+        userId,
+        google: ctx.google ?? null,
+        publicBaseUrl: ctx.publicBaseUrl,
+        oauthStateSecret: ctx.oauthStateSecret,
+        currentMessage: ctx.currentMessage ?? "",
+      }),
+
+    manage_connections: async (): Promise<ManageConnectionsResult> =>
+      manageConnections({
+        db,
+        userId,
+        google: ctx.google ?? null,
+        publicBaseUrl: ctx.publicBaseUrl,
+        oauthStateSecret: ctx.oauthStateSecret,
+        currentMessage: ctx.currentMessage ?? "",
+      }),
+
+    disconnect_calendar: async (args): Promise<DisconnectResult> =>
+      disconnectCalendar(
+        {
+          db,
+          userId,
+          google: ctx.google ?? null,
+          publicBaseUrl: ctx.publicBaseUrl,
+          oauthStateSecret: ctx.oauthStateSecret,
+          currentMessage: ctx.currentMessage ?? "",
+        },
+        args,
+      ),
+
+    propose_event_change: async (args): Promise<ProposeEventChangeResult> =>
+      proposeEventChange(
+        {
+          db,
+          userId,
+          timezone: tz,
+          google: ctx.google ?? null,
+          approvalTtlMinutes: ctx.approvalTtlMinutes ?? 15,
+        },
+        args,
+      ),
 
     list_reminders: async (): Promise<ListRemindersResult> => {
       const rows = await listUpcomingReminders(db, userId, 20);

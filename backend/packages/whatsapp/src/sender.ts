@@ -1,9 +1,21 @@
 import { randomUUID } from "node:crypto";
 
 /** Outbound channel abstraction — dev logs, production talks to Meta. */
+/** One tappable reply button; Meta allows at most three, titles ≤ 20 chars. */
+export interface Button {
+  /** Echoed back in the webhook as the button reply id, e.g. "appr:<uuid>". */
+  id: string;
+  title: string;
+}
+
 export interface Sender {
   readonly kind: string;
   sendText(to: string, text: string): Promise<string>;
+  /**
+   * Text plus tappable reply buttons. Taps come back as inbound interactive
+   * messages carrying the button id, so approvals never rely on free text.
+   */
+  sendButtons(to: string, text: string, buttons: Button[]): Promise<string>;
   /**
    * Proactive/outside-window send using a pre-approved Meta template.
    * Not all senders support it (console simply renders a placeholder).
@@ -22,6 +34,11 @@ export function createConsoleSender(label = "console"): Sender {
     kind: `console:${label}`,
     async sendText(to, text) {
       console.log(`\n[whatsapp:console] → ${to}\n${text}\n`);
+      return `console:${randomUUID()}`;
+    },
+    async sendButtons(to, text, buttons) {
+      const list = buttons.map((b) => `[${b.title}] (${b.id})`).join("  ");
+      console.log(`\n[whatsapp:console] → ${to}\n${text}\n${list}\n`);
       return `console:${randomUUID()}`;
     },
     async sendTemplate(to, name, language, params) {
@@ -68,6 +85,23 @@ export function createCloudApiSender(cfg: CloudApiConfig): Sender {
         to,
         type: "text",
         text: { preview_url: false, body: text },
+      });
+    },
+    async sendButtons(to, text, buttons) {
+      return post({
+        messaging_product: "whatsapp",
+        to,
+        type: "interactive",
+        interactive: {
+          type: "button",
+          body: { text },
+          action: {
+            buttons: buttons.slice(0, 3).map((b) => ({
+              type: "reply",
+              reply: { id: b.id, title: b.title.slice(0, 20) },
+            })),
+          },
+        },
       });
     },
     async sendTemplate(to, name, language, params) {

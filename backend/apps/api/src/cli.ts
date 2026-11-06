@@ -32,6 +32,9 @@ async function main(): Promise<void> {
       );
       return `cli:${randomUUID()}`;
     },
+    async sendButtons(_to, _text, _buttons) {
+      return `cli:${randomUUID()}`;
+    },
   };
 
   const deps: PipelineDeps = {

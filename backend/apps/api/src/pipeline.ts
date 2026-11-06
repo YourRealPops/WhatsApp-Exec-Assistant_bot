@@ -17,8 +17,10 @@ import {
   type LlmConfig,
   type LlmMessage,
 } from "@exec-assistant/ai";
-import type { InboundMessage, Sender } from "@exec-assistant/whatsapp";
+import type { Button, InboundMessage, Sender } from "@exec-assistant/whatsapp";
 import { buildTools, ensureDevEvents } from "./tools.js";
+import type { GoogleConfig } from "./calendar-access.js";
+import { handleDecision } from "./decisions.js";
 
 /**
  * The first thing a brand-new user ever hears from ECOS. It is fixed copy on
@@ -38,6 +40,10 @@ export interface PipelineDeps {
   /** Both needed to append a reconnect link to a reply. */
   publicBaseUrl?: string;
   oauthStateSecret?: string;
+  /** Google credentials + token key; absent disables calendar writes. */
+  google?: GoogleConfig | null;
+  /** How long an approval stays valid (APPROVAL_TTL_MINUTES). */
+  approvalTtlMinutes?: number;
 }
 
 /**
@@ -129,6 +135,7 @@ export async function processInbound(
         userId: user.id,
         phone: user.phone,
         text: msg.text,
+        replyId: msg.replyId,
         excludeMessageId: msg.id,
       });
     } catch (err) {
@@ -147,6 +154,8 @@ export async function handleUserText(
     userId: string;
     phone: string;
     text: string;
+    /** Button id from a tapped reply button, when this turn was a tap. */
+    replyId?: string | null;
     excludeMessageId?: string;
   },
 ): Promise<AgentResult> {
@@ -176,6 +185,24 @@ export async function handleUserText(
     }
   }
 
+  // Approve/Reject is decided by code, not by the model: ownership, expiry,
+  // one-time use and the integrity hash are all checked before any write.
+  const decision = await handleDecision(
+    { db: deps.db, google: deps.google ?? null },
+    { userId: opts.userId, text: opts.text, replyId: opts.replyId ?? null },
+  );
+  if (decision) {
+    await saveMessage(deps.db, {
+      id: `out:${randomUUID()}`,
+      userId: opts.userId,
+      direction: "outbound",
+      body: decision.reply,
+    });
+    console.log(`[pipeline] → ${opts.phone} (${decision.mode}): ${decision.reply}`);
+    await safeSend(deps, opts.phone, decision.reply);
+    return decision;
+  }
+
   const history: LlmMessage[] = prior.map((m) => ({
     role: m.direction === "inbound" ? "user" : "assistant",
     content: m.body,
@@ -190,6 +217,10 @@ export async function handleUserText(
     devCalendar: deps.devCalendar,
     publicBaseUrl: deps.publicBaseUrl,
     oauthStateSecret: deps.oauthStateSecret,
+    google: deps.google ?? null,
+    needsConnect: !deps.google,
+    approvalTtlMinutes: deps.approvalTtlMinutes,
+    currentMessage: opts.text,
   });
 
   const result = await runAgent({
@@ -209,7 +240,21 @@ export async function handleUserText(
       ),
   });
 
-  const reply = await withReconnectNotice(deps, opts.userId, result.reply);
+  let reply = await withReconnectNotice(deps, opts.userId, result.reply);
+
+  // A created proposal is always delivered verbatim, with the buttons that
+  // decide it: the exact change the user approves is the exact change stored.
+  const proposal = result.toolCalls.find(
+    (call) => call.name === "propose_event_change" && call.ok,
+  )?.result as { proposalId?: string; message?: string } | undefined;
+  let buttons: Button[] | undefined;
+  if (proposal?.proposalId && proposal.message) {
+    reply = proposal.message;
+    buttons = [
+      { id: `appr:${proposal.proposalId}`, title: "Approve" },
+      { id: `rej:${proposal.proposalId}`, title: "Reject" },
+    ];
+  }
 
   await saveMessage(deps.db, {
     id: `out:${randomUUID()}`,
@@ -219,7 +264,16 @@ export async function handleUserText(
   });
 
   console.log(`[pipeline] → ${opts.phone} (${result.mode}): ${reply}`);
-  await safeSend(deps, opts.phone, reply);
+  if (buttons) {
+    try {
+      await deps.sender.sendButtons(opts.phone, reply, buttons);
+    } catch (err) {
+      console.error(`[pipeline] button send to ${opts.phone} failed:`, err);
+      await safeSend(deps, opts.phone, `${reply}\n\nReply yes to approve or no to reject.`);
+    }
+  } else {
+    await safeSend(deps, opts.phone, reply);
+  }
   return { ...result, reply };
 }
 

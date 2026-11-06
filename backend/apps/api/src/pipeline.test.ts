@@ -72,6 +72,9 @@ function createSender() {
       sent.push(`[template ${name}] ${params.join(" | ")}`);
       return `test:${sent.length}`;
     },
+    async sendButtons(_to, _text, _buttons) {
+      return `test:${sent.length}`;
+    },
   };
   return { sender, sent };
 }

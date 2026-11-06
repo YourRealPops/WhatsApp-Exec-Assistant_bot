@@ -1,4 +1,4 @@
-import { createDb, runMigrations } from "@exec-assistant/db";
+import { createDb, encryptLegacyTokens, runMigrations } from "@exec-assistant/db";
 import { createConfiguredSender } from "@exec-assistant/whatsapp";
 import { env } from "./config/env.js";
 import { createApp } from "./app.js";
@@ -22,6 +22,18 @@ async function main(): Promise<void> {
     model: env.llm.model,
   };
 
+  // Backfill: rows written before encryption exists are rotated so the
+  // database never holds plaintext OAuth tokens again. This block runs only
+  // inside main(), where top-level await is legal.
+  if (env.google.tokenKey) {
+    const { encryptToken } = await import("@exec-assistant/calendar");
+    const changed = await encryptLegacyTokens(db, {
+      isEncrypted: (v) => v.startsWith("v1:"),
+      encrypt: (value) => encryptToken(value, env.google.tokenKey!),
+    });
+    if (changed > 0) console.log(`[api] encrypted ${changed} legacy token row(s)`);
+  }
+
   const pipeline: PipelineDeps = {
     db,
     sender,
@@ -30,6 +42,10 @@ async function main(): Promise<void> {
     defaultTimezone: env.defaultTimezone,
     publicBaseUrl: env.publicBaseUrl,
     oauthStateSecret: env.google.stateSecret,
+    google: env.google.configured
+      ? { clientId: env.google.clientId!, clientSecret: env.google.clientSecret!, tokenKey: env.google.tokenKey }
+      : null,
+    approvalTtlMinutes: env.approvalTtlMinutes,
   };
 
   const app = createApp({

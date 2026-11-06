@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import express from "express";
 import { buildConnectUrl, signState, verifyState } from "@exec-assistant/calendar";
@@ -33,7 +34,24 @@ function createFakeDb() {
         accessToken: values[2],
         refreshToken: values[3],
       });
-      return Promise.resolve([{}]);
+      return Promise.resolve([
+        {
+          id: randomUUID(),
+          user_id: values[0] as string,
+          provider: "google",
+          access_token: values[2] as string,
+          refresh_token: values[3] ?? null,
+          expires_at: null,
+          calendar_id: "primary",
+          synced_at: null,
+          account_email: null,
+          scopes: [],
+          connected_at: null,
+          last_sync_error: null,
+          reauth_required_at: null,
+          created_at: new Date(),
+        },
+      ]);
     }
     if (sql.includes("from users")) {
       const found = users.get(String(values[0]));

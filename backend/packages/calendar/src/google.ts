@@ -7,9 +7,52 @@ const CALENDAR_ENDPOINT = "https://www.googleapis.com/calendar/v3/calendars";
 /** Google caps a page at 2500; more than this many pages means something is off. */
 const MAX_PAGES = 40;
 
+const REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
+
+export interface GoogleEventDetail {
+  event: {
+    externalId: string;
+    title: string;
+    start: Date;
+    end: Date;
+    allDay?: boolean;
+    location?: string | null;
+    description?: string | null;
+    status: string;
+  };
+  etag: string | null;
+  attendees: number;
+  organizerSelf: boolean;
+  guestsCanModify: boolean;
+  rawStatus: string;
+  htmlLink: string | null;
+}
+
+/**
+ * `openid email` identify the account the user connected (shown in status and
+ * on the connections page); calendar.events is the only calendar permission —
+ * read and edit events, nothing else (no settings, no sharing, no deletes).
+ */
 export const GOOGLE_SCOPES = [
+  "openid",
+  "email",
   "https://www.googleapis.com/auth/calendar.events",
 ];
+
+/** Plain words for what a Google consent screen will ask for. */
+export const CALENDAR_PERMISSION_PLAIN = "view and edit your calendar events";
+
+/** Human description of the scopes actually granted on an account. */
+export function describeScopes(scopes: string[]): string {
+  const has = (needle: string) => scopes.some((s) => s.includes(needle));
+  const labels: string[] = [];
+  if (has("calendar.events")) labels.push("view and edit your calendar events");
+  if (has("calendar.readonly")) labels.push("view your calendar");
+  if (has("email")) labels.push("see which Google account you connected");
+  return labels.length > 0
+    ? labels.join("; ")
+    : "no calendar access recorded — reconnect to renew the permission";
+}
 
 /**
  * The account's credentials are dead and no retry will help: Google answered
@@ -27,6 +70,88 @@ export class CalendarAuthError extends Error {
     super(message);
     this.name = "CalendarAuthError";
     this.code = code;
+  }
+}
+
+/** The event changed on Google's side since the proposal was made (412). */
+export class EventConflictError extends Error {
+  constructor(message = "the event changed since the proposal was made") {
+    super(message);
+    this.name = "EventConflictError";
+  }
+}
+
+/**
+ * The write may or may not have landed: timeout, network error, 429 or 5xx.
+ * The only safe next step is to re-read the event before deciding anything.
+ */
+export class TransientCalendarError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TransientCalendarError";
+  }
+}
+
+/** One event as Google returns it, plus the fields approvals depend on. */
+export interface GoogleEventDetail {
+  event: CalendarEvent;
+  /** Conditional-write token: a PATCH with a stale ETag is rejected with 412. */
+  etag: string | null;
+  attendees: number;
+  organizerSelf: boolean;
+  guestsCanModify: boolean;
+  rawStatus: string;
+  htmlLink: string | null;
+}
+
+export function mapGoogleEventDetail(
+  item: Record<string, any>,
+  timezone = "UTC",
+): GoogleEventDetail | null {
+  const event = mapGoogleEvent(item, timezone);
+  if (!event) return null;
+  return {
+    event,
+    etag: typeof item.etag === "string" ? item.etag : null,
+    attendees: Array.isArray(item.attendees) ? item.attendees.length : 0,
+    organizerSelf: item.organizer?.self === true,
+    guestsCanModify: item.guestsCanModify === true,
+    rawStatus: typeof item.status === "string" ? item.status : "confirmed",
+    htmlLink: typeof item.htmlLink === "string" ? item.htmlLink : null,
+  };
+}
+
+/**
+ * Best-effort revoke at Google. A dead grant or a network failure is not an
+ * error: the local tokens are removed either way.
+ */
+/** The account's email from Google's userinfo endpoint, or null when unavailable. */
+export async function fetchUserEmail(accessToken: string): Promise<string | null> {
+  try {
+    const res = await fetch(
+      "https://www.googleapis.com/oauth2/v3/userinfo",
+      { headers: { Authorization: `Bearer ${accessToken}` } },
+    );
+    if (!res.ok) return null;
+    const data = (await res.json().catch(() => ({}))) as Record<string, any>;
+    return typeof data.email === "string" ? data.email : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function revokeToken(token: string): Promise<boolean> {
+  try {
+    const res = await fetch(
+      `${REVOKE_ENDPOINT}?token=${encodeURIComponent(token)}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      },
+    );
+    return res.ok;
+  } catch {
+    return false;
   }
 }
 
@@ -73,6 +198,7 @@ async function requestTokens(params: Record<string, string>): Promise<OAuthToken
     expiresAt: data.expires_in
       ? new Date(Date.now() + Number(data.expires_in) * 1000)
       : null,
+    scopes: typeof data.scope === "string" ? data.scope.split(" ").filter(Boolean) : undefined,
   };
 }
 
@@ -148,6 +274,13 @@ export interface GoogleClientOptions {
 /** Calendar client for one connected Google account. */
 export function createGoogleClient(opts: GoogleClientOptions): CalendarClient & {
   getTokens(): OAuthTokens;
+  getEvent(eventId: string): Promise<GoogleEventDetail | null>;
+  patchEventTimes(input: { eventId: string;
+    etag: string | null;
+    start: Date;
+    end: Date;
+    sendUpdates: "all" | "none";
+  }): Promise<GoogleEventDetail>;
 } {
   let tokens = opts.tokens;
   const calendarId = encodeURIComponent(opts.calendarId ?? "primary");
@@ -215,9 +348,103 @@ export function createGoogleClient(opts: GoogleClientOptions): CalendarClient & 
     return data;
   }
 
+  function eventUrl(eventId: string): string {
+    return `${CALENDAR_ENDPOINT}/${calendarId}/events/${encodeURIComponent(eventId)}`;
+  }
+
+  /** Retry exactly once after a refresh when Google answers 401. */
+  async function authorized(
+    doRequest: (accessToken: string) => Promise<Response>,
+  ): Promise<Response> {
+    await ensureFreshToken();
+    const first = await doRequest(tokens.accessToken);
+    if (first.status !== 401) return first;
+    if (!tokens.refreshToken) {
+      throw new CalendarAuthError(
+        "Google rejected the access token and there is no refresh token",
+        "invalid_token",
+      );
+    }
+    await refresh();
+    return doRequest(tokens.accessToken);
+  }
+
   return {
     provider: "google",
     getTokens: () => tokens,
+
+    async getEvent(eventId: string): Promise<GoogleEventDetail | null> {
+      const res = await authorized((accessToken) =>
+        fetch(eventUrl(eventId), {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        }),
+      );
+      if (res.status === 404) return null;
+      const data = (await res.json().catch(() => ({}))) as Record<string, any>;
+      if (!res.ok) {
+        throw new Error(
+          `Google Calendar read failed (${res.status}): ${data?.error?.message ?? "unknown"}`,
+        );
+      }
+      return mapGoogleEventDetail(data, timezone);
+    },
+
+    /**
+     * Move one event. Conditional on the ETag the user approved, so a change
+     * made in between fails with EventConflictError instead of overwriting it.
+     * Only start/end are sent: the proposal is a reschedule, nothing else.
+     */
+    async patchEventTimes(input): Promise<GoogleEventDetail> {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (input.etag) headers["If-Match"] = input.etag;
+      const body = JSON.stringify({
+        start: {
+          dateTime: input.start.toISOString(),
+          timeZone: timezone,
+        },
+        end: { dateTime: input.end.toISOString(), timeZone: timezone },
+      });
+
+      let res: Response;
+      try {
+        res = await authorized((accessToken) =>
+          fetch(eventUrl(input.eventId), {
+            method: "PATCH",
+            headers: { ...headers, Authorization: `Bearer ${accessToken}` },
+            body,
+          }),
+        );
+      } catch (err) {
+        // A dead grant must stay a CalendarAuthError; anything else during the
+        // request means the write state is unknown.
+        if (err instanceof CalendarAuthError) throw err;
+        throw new TransientCalendarError(
+          `Google Calendar update did not complete: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      const data = (await res.json().catch(() => ({}))) as Record<string, any>;
+      if (res.status === 412) throw new EventConflictError();
+      if (res.status === 429 || res.status >= 500) {
+        throw new TransientCalendarError(
+          `Google Calendar update failed (${res.status}): the write state is unknown`,
+        );
+      }
+      if (!res.ok) {
+        throw new Error(
+          `Google Calendar update failed (${res.status}): ${data?.error?.message ?? "unknown"}`,
+        );
+      }
+      const detail = mapGoogleEventDetail(data, timezone);
+      if (!detail) {
+        throw new TransientCalendarError(
+          "Google returned a response we could not read",
+        );
+      }
+      return detail;
+    },
     async listEvents(from, to): Promise<CalendarEvent[]> {
       await ensureFreshToken();
 

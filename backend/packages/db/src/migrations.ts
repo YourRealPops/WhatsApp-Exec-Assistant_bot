@@ -102,7 +102,63 @@ const MIGRATIONS: string[] = [
   -- every later reply can address the user by name until they change it.
   alter table users add column if not exists designation text;
   `,
+  `
+  -- A visible connection: which Google account, exactly what it granted, when
+  -- it was linked and why the last sync failed (if it did).
+  alter table calendar_accounts
+    add column if not exists account_email text,
+    add column if not exists scopes text[] not null default '{}',
+    add column if not exists connected_at timestamptz,
+    add column if not exists last_sync_error text;
+
+  -- Reschedule proposals. ECOS never writes to Google on the model's say-so:
+  -- it stores the exact intended change, asks, and executes only an approved
+  -- proposal. payload_hash is the integrity check for "exactly what was
+  -- approved is exactly what runs".
+  create table if not exists proposals (
+    id uuid primary key default gen_random_uuid(),
+    user_id uuid not null references users(id) on delete cascade,
+    kind text not null default 'reschedule'
+      check (kind in ('reschedule')),
+    payload jsonb not null,
+    payload_hash text not null,
+    status text not null default 'pending'
+      check (status in ('pending', 'approved', 'rejected', 'expired',
+                        'executing', 'succeeded', 'failed')),
+    expires_at timestamptz not null,
+    created_at timestamptz not null default now(),
+    decided_at timestamptz,
+    executed_at timestamptz,
+    provider_result jsonb,
+    error text
+  );
+  create index if not exists proposals_user_pending_idx
+    on proposals (user_id, status, expires_at);
+  create index if not exists proposals_expiry_idx
+    on proposals (expires_at) where status = 'pending';
+
+  -- Every transition, with a timestamp (masked, no message bodies).
+  create table if not exists proposal_events (
+    id bigserial primary key,
+    proposal_id uuid not null references proposals(id) on delete cascade,
+    from_status text,
+    to_status text not null,
+    detail text,
+    created_at timestamptz not null default now()
+  );
+  create index if not exists proposal_events_proposal_idx
+    on proposal_events (proposal_id, created_at);
+
+  -- Single-use web actions (disconnect): a signed link can be replayed, a
+  -- nonce can only be spent once.
+  create table if not exists used_nonces (
+    nonce text primary key,
+    used_at timestamptz not null default now()
+  );
+  `,
 ];
+
+export const MIGRATION_COUNT = MIGRATIONS.length;
 
 export async function runMigrations(db: Db): Promise<void> {
   await db.begin(async (tx) => {

@@ -13,8 +13,15 @@ export const CONNECT_TOKEN_TTL_MS = 30 * 60_000;
 /** The redirect Google sees dies with the consent screen it belongs to. */
 export const OAUTH_STATE_TTL_MS = 10 * 60_000;
 
-/** A connect link must never be redeemable as a callback state, or vice versa. */
-export type StatePurpose = "connect" | "oauth";
+/**
+ * A connect link must never be redeemable as a callback state, or vice versa —
+ * and the connections page gets its own purpose so a connect link can't be
+ * replayed there either.
+ */
+export type StatePurpose = "connect" | "oauth" | "connections";
+
+/** The connections page is a reading + disconnect action, not an auth flow. */
+export const CONNECTIONS_TOKEN_TTL_MS = 30 * 60_000;
 
 export interface StatePayload {
   uid: string;
@@ -46,7 +53,9 @@ function parsePayload(raw: string): StatePayload | null {
   const { uid, exp, purpose } = parsed as Record<string, unknown>;
   if (typeof uid !== "string" || uid.length === 0) return null;
   if (typeof exp !== "number" || !Number.isFinite(exp)) return null;
-  if (purpose !== "connect" && purpose !== "oauth") return null;
+  if (purpose !== "connect" && purpose !== "oauth" && purpose !== "connections") {
+    return null;
+  }
   return { uid, exp, purpose };
 }
 
@@ -61,7 +70,11 @@ export function signState(opts: {
   assertSecret(opts.secret);
   const ttlMs =
     opts.ttlMs ??
-    (opts.purpose === "connect" ? CONNECT_TOKEN_TTL_MS : OAUTH_STATE_TTL_MS);
+    (opts.purpose === "connect"
+      ? CONNECT_TOKEN_TTL_MS
+      : opts.purpose === "connections"
+        ? CONNECTIONS_TOKEN_TTL_MS
+        : OAUTH_STATE_TTL_MS);
   const now = (opts.now ?? new Date()).getTime();
   const payload: StatePayload = {
     uid: opts.uid,
@@ -119,6 +132,24 @@ export function buildConnectUrl(opts: {
     now: opts.now,
   });
   return `${opts.baseUrl.replace(/\/+$/, "")}/auth/google?token=${encodeURIComponent(token)}`;
+}
+
+/** `/connections?token=<signed, 30 min>` — status + disconnect, in a browser. */
+export function buildConnectionsUrl(opts: {
+  baseUrl: string;
+  secret: string;
+  uid: string;
+  ttlMs?: number;
+  now?: Date;
+}): string {
+  const token = signState({
+    secret: opts.secret,
+    uid: opts.uid,
+    purpose: "connections",
+    ttlMs: opts.ttlMs,
+    now: opts.now,
+  });
+  return `${opts.baseUrl.replace(/\/+$/, "")}/connections?token=${encodeURIComponent(token)}`;
 }
 
 /**

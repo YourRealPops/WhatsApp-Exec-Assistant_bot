@@ -27,11 +27,20 @@ export interface CalendarAccount {
   id: string;
   user_id: string;
   provider: string;
+  /** Ciphertext (AES-256-GCM, "v1:" prefixed) — never log this. */
   access_token: string;
+  /** Ciphertext, or null when Google issued no refresh token. */
   refresh_token: string | null;
   expires_at: Date | null;
   calendar_id: string;
   synced_at: Date | null;
+  /** The Google account that granted access, shown in status and the web page. */
+  account_email: string | null;
+  /** Exactly what Google granted, e.g. calendar.events. */
+  scopes: string[];
+  connected_at: Date | null;
+  /** Why the last sync failed; null means the last sync was clean. */
+  last_sync_error: string | null;
   /** Google rejected the grant; the account is paused until the user reconnects. */
   reauth_required_at: Date | null;
   created_at: Date;
@@ -184,26 +193,36 @@ export async function upsertCalendarAccount(
   input: {
     userId: string;
     provider: string;
+    /** Ciphertext: encrypt before calling (see packages/calendar crypto). */
     accessToken: string;
     refreshToken?: string | null;
     expiresAt?: Date | null;
     calendarId?: string;
+    accountEmail?: string | null;
+    scopes?: string[];
   }
 ): Promise<CalendarAccount> {
   const rows = await db`
     insert into calendar_accounts
-      (user_id, provider, access_token, refresh_token, expires_at, calendar_id, synced_at)
+      (user_id, provider, access_token, refresh_token, expires_at, calendar_id,
+       synced_at, account_email, scopes, connected_at)
     values
       (${input.userId}, ${input.provider}, ${input.accessToken},
        ${input.refreshToken ?? null}, ${input.expiresAt ?? null},
-       ${input.calendarId ?? "primary"}, null)
+       ${input.calendarId ?? "primary"}, null, ${input.accountEmail ?? null},
+       ${input.scopes ?? []}::text[], now())
     on conflict (user_id) do update set
       provider = excluded.provider,
       access_token = excluded.access_token,
       refresh_token = coalesce(excluded.refresh_token, calendar_accounts.refresh_token),
       expires_at = excluded.expires_at,
       calendar_id = excluded.calendar_id,
+      account_email = coalesce(excluded.account_email, calendar_accounts.account_email),
+      scopes = case when cardinality(excluded.scopes) > 0
+                    then excluded.scopes else calendar_accounts.scopes end,
+      connected_at = now(),
       synced_at = null,
+      last_sync_error = null,
       reauth_required_at = null
     returning *`;
   return rows[0] as unknown as CalendarAccount;
@@ -254,8 +273,84 @@ export async function markReauthRequired(
   return rows.length > 0;
 }
 
-export async function markSynced(db: Db, accountId: string): Promise<void> {
-  await db`update calendar_accounts set synced_at = now() where id = ${accountId}`;
+export async function markSynced(
+  db: Db,
+  accountId: string,
+  error: string | null = null
+): Promise<void> {
+  await db`
+    update calendar_accounts
+    set synced_at = now(), last_sync_error = ${error}
+    where id = ${accountId}`;
+}
+
+/**
+ * Encrypt tokens that were stored before encryption existed. Idempotent: rows
+ * that already carry a ciphertext are skipped, so it is safe on every boot.
+ */
+export async function encryptLegacyTokens(
+  db: Db,
+  codec: { isEncrypted(value: string): boolean; encrypt(value: string): string }
+): Promise<number> {
+  const rows = await db`
+    select id, access_token, refresh_token from calendar_accounts`;
+  let changed = 0;
+  for (const row of rows) {
+    const access = String(row.access_token);
+    const refresh = row.refresh_token === null ? null : String(row.refresh_token);
+    const accessEnc = codec.isEncrypted(access) ? access : codec.encrypt(access);
+    const refreshEnc =
+      refresh === null || codec.isEncrypted(refresh) ? refresh : codec.encrypt(refresh);
+    if (accessEnc === access && refreshEnc === refresh) continue;
+    await db`
+      update calendar_accounts
+      set access_token = ${accessEnc}, refresh_token = ${refreshEnc}
+      where id = ${row.id}`;
+    changed += 1;
+  }
+  return changed;
+}
+
+/**
+ * Remove a connection and everything derived from it, in one transaction:
+ * the stored tokens, the provider's synced events and their pending reminders.
+ * Idempotent — running it twice is not an error.
+ */
+export async function disconnectCalendarAccount(
+  db: Db,
+  userId: string
+): Promise<{ removed: boolean; cancelledEvents: number; removedReminders: number }> {
+  return db.begin(async (tx) => {
+    const account = await tx`
+      select id from calendar_accounts where user_id = ${userId}`;
+    if (account.length === 0) {
+      return { removed: false, cancelledEvents: 0, removedReminders: 0 };
+    }
+    const cancelled = await tx`
+      update events
+      set status = 'cancelled', updated_at = now()
+      where user_id = ${userId}
+        and status <> 'cancelled'
+        and external_id not like 'dev:%'
+        and external_id not like 'local:%'
+      returning id`;
+    const dropped = await tx`
+      delete from reminders
+      where user_id = ${userId}
+        and event_id is not null
+        and status = 'pending'
+      returning id`;
+    await tx`delete from calendar_accounts where user_id = ${userId}`;
+    return {
+      removed: true,
+      cancelledEvents: cancelled.length,
+      removedReminders: dropped.length,
+    };
+  }) as unknown as {
+    removed: boolean;
+    cancelledEvents: number;
+    removedReminders: number;
+  };
 }
 
 export async function updateAccountTokens(
@@ -358,6 +453,210 @@ export async function reconcileMissingEvents(
     reminders_removed: number;
   };
   return { cancelled: row.cancelled, remindersRemoved: row.reminders_removed };
+}
+
+// ---------------------------------------------------------------------------
+// Proposals (propose → approve → execute → verify)
+// ---------------------------------------------------------------------------
+
+export type ProposalStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "expired"
+  | "executing"
+  | "succeeded"
+  | "failed";
+
+/** The exact change a user is approving — stored, hashed and executed verbatim. */
+export interface ProposalPayload {
+  eventId: string;
+  calendarId: string;
+  title: string;
+  before: { start: string; end: string };
+  after: { start: string; end: string };
+  /** ETag of the event when the proposal was made; the write is conditional on it. */
+  etag: string | null;
+  timezone: string;
+  /** Guests on the event: drives Google's sendUpdates on execution. */
+  attendees: number;
+  sendUpdates: "all" | "none";
+}
+
+export interface Proposal {
+  id: string;
+  user_id: string;
+  kind: string;
+  payload: ProposalPayload;
+  payload_hash: string;
+  status: ProposalStatus;
+  expires_at: Date;
+  created_at: Date;
+  decided_at: Date | null;
+  executed_at: Date | null;
+  provider_result: Record<string, unknown> | null;
+  error: string | null;
+}
+
+export async function createProposal(
+  db: Db,
+  input: {
+    userId: string;
+    kind?: "reschedule";
+    payload: ProposalPayload;
+    payloadHash: string;
+    expiresAt: Date;
+  }
+): Promise<Proposal> {
+  const rows = await db`
+    insert into proposals (user_id, kind, payload, payload_hash, expires_at)
+    values (${input.userId}, ${input.kind ?? "reschedule"},
+            ${JSON.stringify(input.payload)}::jsonb, ${input.payloadHash},
+            ${input.expiresAt})
+    returning *`;
+  return rows[0] as unknown as Proposal;
+}
+
+export async function getProposal(
+  db: Db,
+  id: string
+): Promise<Proposal | null> {
+  const rows = await db`select * from proposals where id = ${id}`;
+  return (rows[0] as unknown as Proposal) ?? null;
+}
+
+export async function listPendingProposals(
+  db: Db,
+  userId: string,
+  now: Date = new Date()
+): Promise<Proposal[]> {
+  const rows = await db`
+    select * from proposals
+    where user_id = ${userId}
+      and status = 'pending'
+      and expires_at > ${now}
+    order by created_at desc`;
+  return rows as unknown as Proposal[];
+}
+
+/**
+ * One-time use: pending → executing in a single UPDATE. Whoever gets a row
+ * back owns the execution; a second tap (or a second worker) gets null.
+ * Also enforces ownership and expiry inside the statement.
+ */
+export async function claimProposal(
+  db: Db,
+  opts: { id: string; userId: string; now?: Date }
+): Promise<Proposal | null> {
+  const now = opts.now ?? new Date();
+  const rows = await db`
+    update proposals
+    set status = 'executing', decided_at = now()
+    where id = ${opts.id}
+      and user_id = ${opts.userId}
+      and status = 'pending'
+      and expires_at > ${now}
+    returning *`;
+  return (rows[0] as unknown as Proposal) ?? null;
+}
+
+export async function rejectProposal(
+  db: Db,
+  opts: { id: string; userId: string; now?: Date }
+): Promise<Proposal | null> {
+  const now = opts.now ?? new Date();
+  const rows = await db`
+    update proposals
+    set status = 'rejected', decided_at = now()
+    where id = ${opts.id}
+      and user_id = ${opts.userId}
+      and status = 'pending'
+      and expires_at > ${now}
+    returning *`;
+  return (rows[0] as unknown as Proposal) ?? null;
+}
+
+/** Terminal state for an execution attempt that already claimed the proposal. */
+export async function finishProposal(
+  db: Db,
+  id: string,
+  result: {
+    status: "succeeded" | "failed";
+    providerResult?: Record<string, unknown> | null;
+    error?: string | null;
+  }
+): Promise<void> {
+  await db`
+    update proposals
+    set status = ${result.status},
+        executed_at = now(),
+        provider_result = ${
+          result.providerResult ? JSON.stringify(result.providerResult) : null
+        }::jsonb,
+        error = ${result.error ?? null}
+    where id = ${id} and status = 'executing'`;
+}
+
+/** Terminal failure for a proposal that never reached a provider write. */
+export async function failProposal(
+  db: Db,
+  id: string,
+  error: string
+): Promise<void> {
+  await db`
+    update proposals
+    set status = 'failed', error = ${error}, executed_at = coalesce(executed_at, now())
+    where id = ${id} and status in ('pending', 'executing')`;
+}
+
+/** Flip one pending proposal to expired (e.g. a tap that arrived too late). */
+export async function expireProposal(db: Db, id: string): Promise<boolean> {
+  const rows = await db`
+    update proposals
+    set status = 'expired', decided_at = now()
+    where id = ${id} and status = 'pending'
+    returning id`;
+  return rows.length > 0;
+}
+
+/** Worker sweep: pending proposals past their TTL become expired. */
+export async function expireStaleProposals(
+  db: Db,
+  now: Date = new Date()
+): Promise<number> {
+  const rows = await db`
+    update proposals
+    set status = 'expired', decided_at = now()
+    where status = 'pending' and expires_at <= ${now}
+    returning id`;
+  return rows.length;
+}
+
+/** Append-only audit trail of proposal transitions (no message bodies). */
+export async function logProposalEvent(
+  db: Db,
+  input: {
+    proposalId: string;
+    from: ProposalStatus | null;
+    to: ProposalStatus;
+    detail?: string | null;
+  }
+): Promise<void> {
+  await db`
+    insert into proposal_events (proposal_id, from_status, to_status, detail)
+    values (${input.proposalId}, ${input.from}, ${input.to}, ${input.detail ?? null})`;
+}
+
+/**
+ * Spend a one-shot web nonce. Returns false when it was already used, which is
+ * what makes a replayed disconnect link harmless.
+ */
+export async function useNonce(db: Db, nonce: string): Promise<boolean> {
+  const rows = await db`
+    insert into used_nonces (nonce) values (${nonce})
+    on conflict (nonce) do nothing
+    returning nonce`;
+  return rows.length > 0;
 }
 
 // ---------------------------------------------------------------------------

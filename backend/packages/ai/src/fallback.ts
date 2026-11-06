@@ -1,9 +1,13 @@
 import type { AgentDeps, AgentResult, ToolExecution } from "./agent.js";
 import type {
   ConnectCalendarResult,
+  ConnectionStatusResult,
+  DisconnectResult,
   FindFreeTimeResult,
   ListEventsResult,
   ListRemindersResult,
+  ManageConnectionsResult,
+  ProposeEventChangeResult,
   SaveProfileResult,
 } from "./tools.js";
 import { safeTimezone } from "./agent.js";
@@ -139,14 +143,72 @@ export async function runFallbackAgent(deps: AgentDeps): Promise<AgentResult> {
     );
   }
 
+  if (/(what|which).*(connected|connection)|connection status/.test(t)) {
+    const res: ConnectionStatusResult | null = await call("connection_status", {});
+    if (!res) return reply("I couldn't check the connection just now — try again in a moment.");
+    if (!res.connected) {
+      return reply(
+        "No calendar is connected yet. Message me \"connect my calendar\" and I'll send a private link.",
+      );
+    }
+    const lines = [
+      `Connected: Google Calendar${res.accountEmail ? ` (${res.accountEmail})` : ""}`,
+      `Permission: ${res.permission ?? "view and edit your calendar events"}`,
+      res.lastSyncAt
+        ? `Last sync: ${timeLabel(res.lastSyncAt, tz)} on ${localDate(new Date(res.lastSyncAt), tz)}`
+        : "Last sync: not yet",
+    ];
+    if (res.needsReconnect) {
+      lines.push(
+        "Needs reconnect: Google rejected the permission. Message me \"reconnect my calendar\" for a fresh link.",
+      );
+    } else if (res.lastSyncError) {
+      lines.push(`Last sync reported an error: ${res.lastSyncError}`);
+    }
+    return reply(lines.join("\n"));
+  }
+
+  if (/\bmanage\b/.test(t) && /\bconnection/.test(t)) {
+    const res: ManageConnectionsResult | null = await call("manage_connections", {});
+    if (!res?.url) {
+      return reply("I couldn't create a connections link just now — try again in a moment.");
+    }
+    return reply(
+      `Private connections page (expires in ${res.expiresInMinutes} minutes):\n${res.url}`,
+    );
+  }
+
+  if (/\bdisconnect\b/.test(t) && /(calendar|google)/.test(t)) {
+    // Two steps, never one: the tool decides whether this is the ask or the act.
+    const confirm = /^(yes|yeah|yep|confirm|do it)\b/.test(t);
+    const res: DisconnectResult | null = await call("disconnect_calendar", { confirm });
+    if (!res) return reply("I couldn't reach your connection just now — try again in a moment.");
+    return reply(res.message);
+  }
+
   if (/(connect|reconnect|relink)/.test(t) && /(calendar|google)/.test(t)) {
     const res: ConnectCalendarResult | null = await call("connect_calendar", {});
     if (!res?.url) {
       return reply("I couldn't create a calendar link just now — try again in a moment.");
     }
     return reply(
-      `Open this link within ${res.expiresInMinutes} minutes to connect Google Calendar:\n${res.url}`,
+      `Google will ask for permission to view and edit your calendar events. Nothing changes without your approval.\nOpen this link within ${res.expiresInMinutes} minutes to connect Google Calendar:\n${res.url}`,
     );
+  }
+
+  // "move the board review to friday 10am" — proposal only, never a write.
+  const move = text.match(/^(?:move|reschedule|shift|push)\s+(.+?)\s+to\s+(.+)$/i);
+  if (move) {
+    const res: ProposeEventChangeResult | null = await call("propose_event_change", {
+      event: move[1].trim(),
+      start: move[2].trim(),
+    });
+    if (!res) {
+      return reply(
+        "I couldn't prepare that change — check the event name and the new time, or connect your calendar first.",
+      );
+    }
+    return reply(res.message);
   }
 
   if (/\b(free|availability|available|slot)\b/.test(t)) {

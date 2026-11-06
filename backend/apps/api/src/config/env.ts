@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { config as dotenvConfig } from "dotenv";
-import { MIN_OAUTH_STATE_SECRET_LENGTH } from "@exec-assistant/calendar";
+import { MIN_OAUTH_STATE_SECRET_LENGTH, parseTokenKey } from "@exec-assistant/calendar";
 
 /**
  * Load env files up the directory chain: the monorepo root .env is canonical
@@ -47,6 +47,10 @@ function bool(key: string, fallback: boolean): boolean {
   return value === "true" || value === "1" || value === "yes";
 }
 
+
+
+
+
 function systemTimezone(): string {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -84,7 +88,6 @@ export const env = {
   defaultTimezone: optional("DEFAULT_TIMEZONE") ?? systemTimezone(),
   // Fixture calendar (standup / investor call / gym) until Google is connected.
   devCalendar: bool("DEV_CALENDAR", !googleClientId),
-
   // Read lazily so `pnpm dev:api` still boots with a blank .env — they only
   // throw the moment the code path actually needs them.
   meta: {
@@ -108,8 +111,6 @@ export const env = {
     tryPhoneNumberId: () => optional("META_PHONE_NUMBER_ID"),
   },
 
-  // The opener is free-form text inside the 24h window and this approved
-  // template outside it (see intro.ts).
   intro: {
     templateName: optional("INTRO_TEMPLATE_NAME"),
     templateLanguage: optional("INTRO_TEMPLATE_LANGUAGE") ?? "en",
@@ -127,5 +128,48 @@ export const env = {
     redirectUri: `${publicBaseUrl}/auth/google/callback`,
     configured: !!(googleClientId && googleClientSecret),
     stateSecret: oauthStateSecret,
+    /** AES-256-GCM key (32 bytes) for tokens at rest.
+     *
+     * `env.google.tokenKey` used to self-reference (it read `env.tokenKey`
+     * from the same object), which produced both a circular initialiser and
+     * an implicit `any`. This is the only field whose value is not known
+     * while the module is initialising, so its value is resolved on first
+     * read and cached. The accessor reads the canonical environment variable
+     * `TOKEN_ENCRYPTION_KEY` (see `crypto.ts` for the key-generation command)
+     * and rejects anything that is not a 32-byte key, which is the correct
+     * fail-fast behaviour for the first boot that does configure it.
+     */
+    get tokenKey(): Buffer {
+      if (googleTokenKeyCache !== undefined) return googleTokenKeyCache;
+      const raw = process.env.TOKEN_ENCRYPTION_KEY;
+      if (raw === undefined) {
+        throw new Error(
+          "TOKEN_ENCRYPTION_KEY is not set — generate one with: openssl rand -base64 32",
+        );
+      }
+      googleTokenKeyCache = parseTokenKey(raw);
+      return googleTokenKeyCache;
+    },
   },
+  approvalTtlMinutes: num("APPROVAL_TTL_MINUTES", 15),
 };
+
+/** Cache for the lazily resolved AES-256-GCM token key (see `env.google.tokenKey`).
+ *
+ * `env.google.tokenKey` used to self-reference (it read `env.tokenKey` from
+ * the same object), which produced both a circular initialiser and an
+ * implicit `any`. This is the only field whose value is not known while the
+ * module is initialising, so its value is computed once on first read and
+ * then shared by every reader (the getter, `index.ts` and `routes/auth.ts`).
+ *
+ * `parseTokenKey` is imported once here from `@exec-assistant/calendar`,
+ * the module that already defines it, so the exported `env` object has no
+ * circular self-reference and every reader after the first gets the same
+ * stable key.
+ */
+let googleTokenKeyCache: Buffer | undefined;
+
+function num(key: string, fallback: number): number {
+  const value = Number(optional(key));
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}

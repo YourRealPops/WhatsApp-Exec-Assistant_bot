@@ -23,6 +23,9 @@ function fakeSender(onSend?: () => void): { sent: Array<{ to: string; text: stri
       async sendTemplate() {
         return "test:2";
       },
+      async sendButtons() {
+        return "test:3";
+      },
     },
   };
 }
@@ -37,6 +40,10 @@ function account(overrides: Partial<CalendarAccount> = {}): CalendarAccount {
     expires_at: null,
     calendar_id: "primary",
     synced_at: null,
+    account_email: null,
+    scopes: [],
+    connected_at: null,
+    last_sync_error: null,
     reauth_required_at: new Date("2026-11-05T12:00:00Z"),
     created_at: new Date("2026-11-01T00:00:00Z"),
     phone: PHONE,
@@ -101,6 +108,7 @@ test("without PUBLIC_BASE_URL or OAUTH_STATE_SECRET nothing is sent", async () =
     account(),
   );
   assert.equal(missingSecret.sent.length, 0, "no secret → no link");
+
 });
 
 test("a send outside the 24h window is logged, not thrown", async () => {

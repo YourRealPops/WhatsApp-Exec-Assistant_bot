@@ -36,8 +36,11 @@ export interface AgentDeps {
 export interface AgentResult {
   reply: string;
   toolCalls: ToolExecution[];
-  /** "onboarding" is the fixed first-contact introduction, not an agent reply. */
-  mode: "llm" | "fallback" | "onboarding";
+  /**
+   * "onboarding" is the fixed first-contact introduction and "decision" the
+   * deterministic Approve/Reject handler — neither is a model reply.
+   */
+  mode: "llm" | "fallback" | "onboarding" | "decision";
 }
 
 /** System prompt with the date/time context baked in. */
@@ -74,6 +77,9 @@ export function buildSystemPrompt(opts: {
     `Use bullet lines like "- 09:00 Board review" when listing things.`,
     `Always call the provided tools before answering anything about the calendar, availability or reminders.`,
     `Include the UTC offset when you state a time, e.g. "14:00+01:00".`,
+    `You cannot change the calendar yourself. To move an event times, call propose_event_change; it stores the exact change and sends Approve/Reject buttons. Never say an event was moved, created or deleted in Google until a tool result says it was verified.`,
+    `Before sending a connect link, say in plain words what Google will ask for: permission to "view and edit your calendar events" — and that nothing in the calendar changes without the user's approval.`,
+    `"What's connected" → connection_status. "Manage my connections" → manage_connections. Disconnecting is two steps: ask first, and only call disconnect_calendar with confirm=true after the user says yes.`,
     `If a tool fails, say so in one line and offer the best alternative.`,
     `Keep replies under 120 words unless asked for more detail.`,
   ]

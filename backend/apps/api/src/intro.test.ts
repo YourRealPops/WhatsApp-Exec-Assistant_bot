@@ -61,6 +61,9 @@ function createSender(opts: { failText?: Error } = {}) {
       sent.push(`[template ${name}]`);
       return `test:${sent.length}`;
     },
+    async sendButtons(_to, _text, _buttons) {
+      return `test:${sent.length}`;
+    },
   };
   return { sender, sent };
 }

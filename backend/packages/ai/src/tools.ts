@@ -107,6 +107,74 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "connection_status",
+      description:
+        "Report which calendar is connected, the account email, what ECOS is allowed to do, when it last synced and whether it needs reconnecting. Use for \"what's connected?\".",
+      parameters: { type: "object", properties: {}, required: [] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "manage_connections",
+      description:
+        "Get a private, time-limited link to the connections page, where the user can see the connection and disconnect it. Use when they say \"manage my connections\".",
+      parameters: { type: "object", properties: {}, required: [] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "disconnect_calendar",
+      description:
+        "Disconnect Google Calendar and delete the stored access. Two steps: call it without confirm to ask the user, and only call it again with confirm=true after they have explicitly said yes in their latest message.",
+      parameters: {
+        type: "object",
+        properties: {
+          confirm: {
+            type: "boolean",
+            description:
+              "True only when the user's latest message is an explicit yes to your disconnect question.",
+          },
+        },
+        required: [],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "propose_event_change",
+      description:
+        "Propose new start/end times for an existing event. This never changes anything: it stores the exact change and sends the user Approve/Reject buttons. Use it for every reschedule request — never say an event was moved before the tool reports it succeeded.",
+      parameters: {
+        type: "object",
+        properties: {
+          event: {
+            type: "string",
+            description:
+              "Which event, by title or a distinctive part of it (e.g. \"board review\").",
+          },
+          event_id: {
+            type: "string",
+            description: "External event id from list_events, when known. Preferred over a title.",
+          },
+          start: {
+            type: "string",
+            description: "New start: ISO 8601 with offset, or YYYY-MM-DDTHH:mm in the user's timezone.",
+          },
+          end: {
+            type: "string",
+            description: "New end. Omit it to keep the event's current duration.",
+          },
+        },
+        required: ["start"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "save_profile",
       description:
         "Save or edit the user's name and designation on their profile. Call it when they tell you their name or role, or ask to be called something else. Pass only what changed — an omitted field keeps its stored value.",
@@ -140,6 +208,8 @@ export function toolDefinitionFor(name: string): ToolDefinition | undefined {
 // ---------------------------------------------------------------------------
 
 export interface EventSlot {
+  /** External id (Google's event id) — needed to propose a change to it. */
+  id: string;
   title: string;
   start: string;
   end: string;
@@ -163,6 +233,9 @@ export interface CreateEventResult {
   title: string;
   start: string;
   end: string;
+  /** True when calendar writes are off: the event is a local placeholder
+   *  until Google Calendar is connected. */
+  needsConnect: boolean;
 }
 
 export interface SetReminderResult {
@@ -176,6 +249,45 @@ export interface SetReminderResult {
 export interface ConnectCalendarResult {
   url: string;
   expiresInMinutes: number;
+}
+
+export interface ConnectionStatusResult {
+  connected: boolean;
+  provider?: string;
+  accountEmail?: string | null;
+  /** Plain words, e.g. "view and edit your calendar events". */
+  permission?: string;
+  connectedAt?: string | null;
+  lastSyncAt?: string | null;
+  lastSyncError?: string | null;
+  /** Google rejected the grant: the user must reconnect before anything syncs. */
+  needsReconnect: boolean;
+  eventsTracked?: number;
+}
+
+export interface ManageConnectionsResult {
+  url: string;
+  expiresInMinutes: number;
+}
+
+export interface ProposeEventChangeResult {
+  proposalId: string;
+  /** The exact change, formatted for the chat — send this text as-is. */
+  message: string;
+  before: { start: string; end: string };
+  after: { start: string; end: string };
+  conflictWarning: string | null;
+  attendees: number;
+  /** Google will notify guests when this executes. */
+  notifiesAttendees: boolean;
+  expiresInMinutes: number;
+}
+
+export interface DisconnectResult {
+  status: "needs-confirmation" | "disconnected" | "not-connected";
+  message: string;
+  cancelledEvents?: number;
+  removedReminders?: number;
 }
 
 export interface SaveProfileResult {
