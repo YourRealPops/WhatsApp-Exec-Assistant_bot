@@ -249,13 +249,18 @@ export async function handleUserText(
   console.log(`[pipeline] → ${opts.phone} (${result.mode}): ${safeReply}`);
   if (buttons) {
     try {
-      await deps.sender.sendButtons(opts.phone, safeReply, buttons);
+      // The link the user taps must reach the client unchanged, so the
+      // connect/oauth/connections URL is transmitted raw and only the
+      // stored copy is redacted.
+      await deps.sender.sendButtons(opts.phone, reply, buttons);
     } catch (err) {
       console.error(`[pipeline] button send to ${opts.phone} failed:`, err);
-      await safeSend(deps, opts.phone, `${safeReply}\n\nReply yes to approve or no to reject.`);
+      await safeSend(deps, opts.phone, `${reply}\n\nReply yes to approve or no to reject.`);
     }
   } else {
-    await safeSend(deps, opts.phone, safeReply);
+    // Push the unredacted reply to the user so the complete calendar link
+    // (with the signed token) reaches their browser; storage keeps the redacted copy.
+    await safeSend(deps, opts.phone, reply);
   }
   return { ...result, reply };
 }
