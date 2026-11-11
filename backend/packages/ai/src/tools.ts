@@ -263,6 +263,8 @@ export interface ConnectionStatusResult {
   /** Google rejected the grant: the user must reconnect before anything syncs. */
   needsReconnect: boolean;
   eventsTracked?: number;
+  /** Machine-readable reason the connection is not simply healthy; null when healthy. */
+  connectionError?: string | null;
 }
 
 export interface ManageConnectionsResult {

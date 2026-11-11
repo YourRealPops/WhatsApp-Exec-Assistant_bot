@@ -1,5 +1,6 @@
 import { disconnectCalendarAccount, getCalendarAccount, listUpcomingEvents, type Db } from "@exec-assistant/db";
 import { buildConnectionsUrl, CONNECTIONS_TOKEN_TTL_MS, describeScopes, revokeToken } from "@exec-assistant/calendar";
+import { tokensFor } from "./calendar-access.js";
 import type {
   ConnectionStatusResult,
   DisconnectResult,
@@ -26,24 +27,76 @@ export async function connectionStatus(
   if (!account) return { connected: false, needsReconnect: false };
 
   const now = Date.now();
-  const upcoming = await listUpcomingEvents(
-    ctx.db,
-    ctx.userId,
-    new Date(now),
-    new Date(now + 14 * 86_400_000),
-    200,
-  );
+
+  // The worker pauses a grant that Google rejected (an expired or revoked
+  // access token, invalid_grant). Report the record as present and trusted, but
+  // flag it so callers know to ask for a fresh consent before syncing again.
+  if (account.reauth_required_at) {
+    return {
+      connected: true,
+      provider: account.provider,
+      accountEmail: account.account_email ?? null,
+      permission: describeScopes(account.scopes ?? []),
+      connectedAt: account.connected_at ? account.connected_at.toISOString() : null,
+      lastSyncAt: account.synced_at ? account.synced_at.toISOString() : null,
+      lastSyncError: account.last_sync_error ?? null,
+      needsReconnect: true,
+      eventsTracked: 0,
+      connectionError: "reauth-required",
+    };
+  }
+
+  // Stored credentials are first-class evidence. An access token is
+  // short-lived, so a stored refresh token is the durable signal that the
+  // grant is still valid: the assistant can rotate to a fresh token whenever
+  // this one expires. Decrypting (which can throw on malformed ciphertext) is
+  // the only step worth doing here; the at-rest key travels with the API.
+  const google = ctx.google;
+  let usable = false;
+  let credentialError: string | null = null;
+
+  if (google) {
+    try {
+      const tokens = tokensFor(account, google.tokenKey);
+      usable = Boolean(tokens.refreshToken) || Boolean(tokens.accessToken);
+    } catch (err) {
+      credentialError = err instanceof Error ? err.message : "credential-invalid";
+    }
+  } else {
+    // No configuration bearing the at-rest key in this process: trust the
+    // record (paused refs are already visible through reauth_required_at) and
+    // report the connection as healthy for the status itself.
+    usable = true;
+  }
+
+  // Count activity in a window that matches the scheduled sync horizon, so a
+  // freshly synced account is not reported as "no calendar access recorded"
+  // just because nothing falls in the next 14 days.
+  let eventsTracked = 0;
+  if (account.synced_at) {
+    // A window that matches the scheduled sync horizon (one day), so a
+    // freshly synced account is not reported as "no calendar access recorded"
+    // because nothing falls in the next 14 days.
+    const from = new Date(now - 24 * 3_600_000);
+    const to = new Date(now + 14 * 86_400_000);
+    const events = await listUpcomingEvents(ctx.db, ctx.userId, from, to, 250);
+    eventsTracked = events.length;
+  }
+
+  const connected = usable && !credentialError;
+  const needsReconnect = account.reauth_required_at !== null || credentialError !== null;
 
   return {
-    connected: true,
+    connected,
     provider: account.provider,
     accountEmail: account.account_email ?? null,
     permission: describeScopes(account.scopes ?? []),
     connectedAt: account.connected_at ? account.connected_at.toISOString() : null,
     lastSyncAt: account.synced_at ? account.synced_at.toISOString() : null,
     lastSyncError: account.last_sync_error ?? null,
-    needsReconnect: !!account.reauth_required_at,
-    eventsTracked: upcoming.length,
+    needsReconnect,
+    eventsTracked,
+    connectionError: connected ? null : credentialError ?? "credential-invalid",
   };
 }
 
