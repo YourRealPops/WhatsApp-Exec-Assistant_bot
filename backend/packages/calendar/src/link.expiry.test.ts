@@ -53,9 +53,18 @@ test("an expired link does not verify and cannot be re-used", () => {
   const url = new URL(expired);
   const token = url.searchParams.get("token")!;
 
+  const expiredAt = new Date("2026-11-05T12:01:00Z");
   assert.equal(
-    verifyState({ secret: SECRET, token: token!, purpose: "connect", now: new Date("2026-11-05T12:01:00Z") }),
+    verifyState({ secret: SECRET, token: token!, purpose: "connect", now: expiredAt }),
     null,
     "the link is expired and must not verify",
+  );
+
+  // Re-submitting the same stale bearer must fail the same way it did the
+  // first time: the expired token is rejected outright, never accepted.
+  assert.equal(
+    verifyState({ secret: SECRET, token: token!, purpose: "connect", now: new Date("2026-11-06T00:00:00Z") }),
+    null,
+    "the expired token is rejected again",
   );
 });
