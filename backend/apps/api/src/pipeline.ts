@@ -8,7 +8,9 @@ import {
   setUserProfile,
   type Db,
 } from "@exec-assistant/db";
-import { buildConnectUrl, reconnectNotice } from "@exec-assistant/calendar";
+import { buildConnectUrl } from "@exec-assistant/calendar";
+import { redactQueryValues } from "@exec-assistant/ai";
+
 import {
   buildSystemPrompt,
   parseProfile,
@@ -44,32 +46,6 @@ export interface PipelineDeps {
   google?: GoogleConfig | null;
   /** How long an approval stays valid (APPROVAL_TTL_MINUTES). */
   approvalTtlMinutes?: number;
-}
-
-/**
- * A flagged calendar account cannot sync, and a proactive message may fall
- * outside the 24h window — so the user's next reply carries the link instead.
- * One line, and never a reason to fail the turn.
- */
-async function withReconnectNotice(
-  deps: PipelineDeps,
-  userId: string,
-  reply: string,
-): Promise<string> {
-  if (!deps.publicBaseUrl || !deps.oauthStateSecret) return reply;
-  try {
-    const account = await getCalendarAccount(deps.db, userId);
-    if (!account?.reauth_required_at) return reply;
-    const link = buildConnectUrl({
-      baseUrl: deps.publicBaseUrl,
-      secret: deps.oauthStateSecret,
-      uid: userId,
-    });
-    return `${reply}\n\n${reconnectNotice(link)}`;
-  } catch (err) {
-    console.error("[pipeline] reconnect notice failed:", err);
-    return reply;
-  }
 }
 
 /**
@@ -191,13 +167,12 @@ export async function handleUserText(
     { db: deps.db, google: deps.google ?? null },
     { userId: opts.userId, text: opts.text, replyId: opts.replyId ?? null },
   );
-  if (decision) {
-    await saveMessage(deps.db, {
-      id: `out:${randomUUID()}`,
-      userId: opts.userId,
-      direction: "outbound",
-      body: decision.reply,
-    });
+  if (decision) {  await saveMessage(deps.db, {
+    id: `out:${randomUUID()}`,
+    userId: opts.userId,
+    direction: "outbound",
+    body: redactQueryValues(decision.reply),
+  });
     console.log(`[pipeline] → ${opts.phone} (${decision.mode}): ${decision.reply}`);
     await safeSend(deps, opts.phone, decision.reply);
     return decision;
@@ -240,14 +215,14 @@ export async function handleUserText(
       ),
   });
 
-  let reply = await withReconnectNotice(deps, opts.userId, result.reply);
-
   // A created proposal is always delivered verbatim, with the buttons that
   // decide it: the exact change the user approves is the exact change stored.
   const proposal = result.toolCalls.find(
     (call) => call.name === "propose_event_change" && call.ok,
   )?.result as { proposalId?: string; message?: string } | undefined;
+  let reply = result.reply;
   let buttons: Button[] | undefined;
+  let saved: boolean;
   if (proposal?.proposalId && proposal.message) {
     reply = proposal.message;
     buttons = [
@@ -256,12 +231,15 @@ export async function handleUserText(
     ];
   }
 
-  await saveMessage(deps.db, {
+  saved = await saveMessage(deps.db, {
     id: `out:${randomUUID()}`,
     userId: opts.userId,
     direction: "outbound",
-    body: reply,
-  });
+    body: redactQueryValues(reply),
+  }) as boolean;
+  if (!saved) {
+    console.error(`[pipeline] failed to persist outbound for ${opts.phone}`);
+  }
 
   console.log(`[pipeline] → ${opts.phone} (${result.mode}): ${reply}`);
   if (buttons) {

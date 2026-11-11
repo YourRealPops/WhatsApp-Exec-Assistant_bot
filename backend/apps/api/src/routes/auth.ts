@@ -8,7 +8,8 @@ import {
   buildAuthUrl,
   exchangeCode,
   signState,
-  verifyState,
+  verifyStateReason,
+  type Reason,
 } from "@exec-assistant/calendar";
 
 export interface AuthConfig {
@@ -21,6 +22,21 @@ export interface AuthConfig {
   stateSecret?: string;
   /** Keeps the legacy raw `?user=<id>` link for local debugging only. */
   debugRoutes?: boolean;
+}
+
+/**
+ * Log WHY a connect/oauth link was rejected, without touching the token,
+ * the user id, or any other bearer material. The user-facing text stays
+ * generic: clients must not learn which part of a link they got wrong.
+ */
+export function logLinkRejection(
+  reasonResult: ReturnType<typeof verifyStateReason>,
+  unredactedToken: string,
+): void {
+  if (reasonResult.ok) return;
+  console.warn(
+    `[auth] link rejected reason=${reasonResult.reason} minutes=${reasonResult.minutes}`,
+  );
 }
 
 function escapeHtml(value: string): string {
@@ -70,13 +86,12 @@ export function authRouter(cfg: AuthConfig): Router {
     }
 
     const token = typeof req.query.token === "string" ? req.query.token : "";
-    const verified = token
-      ? verifyState({ secret, token, purpose: "connect" })
-      : null;
+    const reasonResult = verifyStateReason({ secret, token, purpose: "connect" });
+    logLinkRejection(reasonResult, token);
+
     // The old raw `?user=` link survives only while debug routes are on.
-    const rawUser =
-      !verified && cfg.debugRoutes ? String(req.query.user ?? "") : "";
-    const userId = verified?.uid ?? rawUser;
+    const rawUser = cfg.debugRoutes ? String(req.query.user ?? "") : "";
+    const userId = reasonResult.ok ? reasonResult.payload.uid : rawUser;
     if (!userId) return badLink(res);
 
     const user = await getUserById(cfg.db, userId);
@@ -103,9 +118,10 @@ export function authRouter(cfg: AuthConfig): Router {
         return badLink(res);
       }
 
-      const payload = verifyState({ secret, token: state, purpose: "oauth" });
-      if (!payload) return badLink(res);
-      const user = await getUserById(cfg.db, payload.uid);
+      const stateReason = verifyStateReason({ secret, token: state, purpose: "oauth" });
+      logLinkRejection(stateReason, state);
+      if (!stateReason.ok) return badLink(res);
+      const user = await getUserById(cfg.db, stateReason.payload.uid);
       if (!user) return badLink(res);
 
       const tokens = await exchangeCode({

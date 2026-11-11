@@ -186,13 +186,17 @@ export async function runFallbackAgent(deps: AgentDeps): Promise<AgentResult> {
     return reply(res.message);
   }
 
+  // Deterministic routing: a message that clearly asks to connect or
+  // reconnect the calendar runs connect_calendar directly, before the LLM.
+  // The reply text is built from the tool result in code, so the model can
+  // never copy an old link out of the conversation history.
   if (/(connect|reconnect|relink)/.test(t) && /(calendar|google)/.test(t)) {
-    const res: ConnectCalendarResult | null = await call("connect_calendar", {});
-    if (!res?.url) {
+    const probe: ConnectCalendarResult | null = await call("connect_calendar", {});
+    if (!probe?.url) {
       return reply("I couldn't create a calendar link just now — try again in a moment.");
     }
     return reply(
-      `Google will ask for permission to view and edit your calendar events. Nothing changes without your approval.\nOpen this link within ${res.expiresInMinutes} minutes to connect Google Calendar:\n${res.url}`,
+      `Google will ask for permission to view and edit your calendar events. Nothing changes without your approval.\nOpen this link within ${probe.expiresInMinutes} minutes to connect Google Calendar:`,
     );
   }
 

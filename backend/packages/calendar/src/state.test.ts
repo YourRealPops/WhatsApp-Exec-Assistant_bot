@@ -7,6 +7,8 @@ import {
   reconnectNotice,
   signState,
   verifyState,
+  verifyStateReason,
+  type Reason,
 } from "./state.js";
 
 const SECRET = "s".repeat(MIN_OAUTH_STATE_SECRET_LENGTH);
@@ -101,6 +103,58 @@ test("the connect link is a 30-minute signed token on /auth/google", () => {
     `expected a ~30 minute lifetime, got ${lifetime}ms`,
   );
   assert.equal(url.searchParams.get("user"), null, "no raw user id in the link");
+});
+
+test("verifyStateReason reports each rejection reason and minutes past expiry", () => {
+  const now = new Date();
+  const uid = "6f1d5a3c-2b7e-4f5a-9c8d-0a1b2c3d4e5f";
+  const good = signState({ secret: SECRET, uid, purpose: "connect", now });
+
+  function reasonOf(result: ReturnType<typeof verifyStateReason>): Reason | undefined {
+    if (result.ok) return undefined;
+    return result.reason;
+  }
+
+  // No token at all.
+  assert.equal(reasonOf(verifyStateReason({ secret: SECRET, token: "", purpose: "connect", now })), "missing");
+
+  // Not a signed token.
+  assert.equal(reasonOf(verifyStateReason({ secret: SECRET, token: "nonsense", purpose: "connect", now })), "malformed");
+
+  // Tampered signature.
+  const [, signature] = good.split(".");
+  const flipped = signature.slice(0, -1) + (signature.endsWith("A") ? "B" : "A");
+  assert.equal(
+    reasonOf(verifyStateReason({ secret: SECRET, token: `${good.split(".")[0]}.${flipped}`, purpose: "connect", now })),
+    "bad_signature",
+  );
+
+  // A validly-signed token for a different uid passes through (signature is
+  // recomputed over the payload, so HMAC protects the payload contents, not
+  // the account it names). Only a forged signature is rejected.
+  const forgedToken = signState({ secret: SECRET, uid: "attacker", purpose: "connect", now });
+  assert.equal(
+    reasonOf(verifyStateReason({ secret: SECRET, token: forgedToken, purpose: "connect", now })),
+    undefined,
+  );
+
+  // Wrong purpose.
+  assert.equal(
+    reasonOf(verifyStateReason({ secret: SECRET, token: signState({ secret: SECRET, uid, purpose: "oauth", now }), purpose: "connect", now })),
+    "wrong_purpose",
+  );
+
+  // Expired.
+  const expired = signState({ secret: SECRET, uid, purpose: "connect", ttlMs: -60_000, now });
+  const expiredResult = verifyStateReason({ secret: SECRET, token: expired, purpose: "connect", now: new Date(now.getTime() + 30_000) });
+  if (expiredResult.ok) throw new Error("expected expired token to fail");
+  assert.equal(expiredResult.reason, "expired");
+  assert.ok(expiredResult.minutes > 0, `minutes past expiry: ${expiredResult.minutes}`);
+
+  // A valid token passes through untouched.
+  const valid = verifyStateReason({ secret: SECRET, token: good, purpose: "connect", now });
+  assert.equal(valid.ok, true);
+  assert.equal(valid.payload.uid, uid);
 });
 
 test("the reconnect notice is one line carrying the link", () => {

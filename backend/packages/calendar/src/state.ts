@@ -20,6 +20,13 @@ export const OAUTH_STATE_TTL_MS = 10 * 60_000;
  */
 export type StatePurpose = "connect" | "oauth" | "connections";
 
+export type Reason =
+  | "expired"
+  | "bad_signature"
+  | "wrong_purpose"
+  | "malformed"
+  | "missing";
+
 /** The connections page is a reading + disconnect action, not an auth flow. */
 export const CONNECTIONS_TOKEN_TTL_MS = 30 * 60_000;
 
@@ -114,6 +121,52 @@ export function verifyState(opts: {
   if (payload.purpose !== opts.purpose) return null;
   if (payload.exp <= (opts.now ?? new Date()).getTime()) return null;
   return payload;
+}
+
+/** What a signed token means, and how many minutes it is past (or before) its expiry.
+ * Returns reason when the token is not a valid, unexpired connect token.
+ * Never exposes the token or the user id — only the reason and a time delta.
+ */
+export function verifyStateReason(opts: {
+  secret: string;
+  token: string;
+  purpose: StatePurpose;
+  now?: Date;
+}): { ok: true; payload: StatePayload } | { ok: false; reason: Reason; minutes: number } {
+  try {
+    assertSecret(opts.secret);
+  } catch {
+    return { ok: false, reason: "malformed", minutes: 0 };
+  }
+
+  if (typeof opts.token !== "string" || opts.token.length === 0) {
+    return { ok: false, reason: "missing", minutes: 0 };
+  }
+
+  const parts = opts.token.split(".");
+  if (parts.length !== 2) return { ok: false, reason: "malformed", minutes: 0 };
+  const [encoded, provided] = parts;
+  if (!encoded || !provided) return { ok: false, reason: "malformed", minutes: 0 };
+
+  const expected = Buffer.from(sign(encoded, opts.secret), "base64url");
+  const actual = Buffer.from(provided, "base64url");
+  if (expected.length !== actual.length) return { ok: false, reason: "bad_signature", minutes: 0 };
+  if (!timingSafeEqual(expected, actual)) return { ok: false, reason: "bad_signature", minutes: 0 };
+
+  let payload: StatePayload | null = null;
+  try {
+    payload = parsePayload(Buffer.from(encoded, "base64url").toString("utf8"));
+  } catch {
+    return { ok: false, reason: "malformed", minutes: 0 };
+  }
+  if (!payload) return { ok: false, reason: "malformed", minutes: 0 };
+  if (payload.purpose !== opts.purpose) return { ok: false, reason: "wrong_purpose", minutes: 0 };
+
+  const nowMs = (opts.now ?? new Date()).getTime();
+  if (payload.exp <= nowMs) {
+    return { ok: false, reason: "expired", minutes: Math.round((nowMs - payload.exp) / 60_000) };
+  }
+  return { ok: true, payload };
 }
 
 /** `/auth/google?token=<signed, 30 min>` — the link we chat to the user. */

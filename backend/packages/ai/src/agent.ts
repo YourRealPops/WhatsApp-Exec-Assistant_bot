@@ -43,7 +43,17 @@ export interface AgentResult {
   mode: "llm" | "fallback" | "onboarding" | "decision";
 }
 
-/** System prompt with the date/time context baked in. */
+/**
+ * When the reply must contain a link (connect/reconnect/connections), the
+ * code that built it is the only place that writes it. Never write a URL in
+ * plain text — a URL that a model re-emits from earlier turns is the exact
+ * way a stale, expired link survives into the current turn.
+ *
+ * - Never write a link yourself; the system inserts it.
+ * - Never repeat a link you saw earlier in the conversation.
+ * - When a user asks to connect or reconnect the calendar, call
+ *   connect_calendar and let the tool result carry the link.
+ */
 export function buildSystemPrompt(opts: {
   timezone: string;
   userName?: string | null;
@@ -82,6 +92,7 @@ export function buildSystemPrompt(opts: {
     `"What's connected" → connection_status. "Manage my connections" → manage_connections. Disconnecting is two steps: ask first, and only call disconnect_calendar with confirm=true after the user says yes.`,
     `If a tool fails, say so in one line and offer the best alternative.`,
     `Keep replies under 120 words unless asked for more detail.`,
+    `Never write a calendar link yourself, never repeat a link you saw earlier in this conversation, and never describe a URL's contents: links are inserted by the system only.`,
   ]
     .filter(Boolean)
     .join("\n");

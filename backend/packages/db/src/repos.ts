@@ -1,5 +1,14 @@
+import { redactQueryValues } from "@exec-assistant/ai";
 import type { Db } from "./client.js";
 
+/**
+ * Redact query values of `token=` and `state=` in every message body. This is
+ * the single place a stored message becomes safe for the LLM context or for
+ * a later outbound row.
+ */
+export function redactMessageBodies(messages: Message[]): Message[] {
+  return messages.map((m) => ({ ...m, body: redactQueryValues(m.body) }));
+}
 // ---------------------------------------------------------------------------
 // Row types
 // ---------------------------------------------------------------------------
@@ -168,20 +177,22 @@ export async function saveMessage(
     on conflict (id) do nothing
     returning id`;
   return rows.length > 0;
-}
-
-/** Most recent messages, oldest first (ready to feed an LLM prompt). */
+}/**
+ * Most recent messages, oldest first (ready to feed an LLM prompt). The
+ * bodies are redacted so any calendar link already in the history can never
+ * be re-quoted by the model or recorded to a new outbound row.
+ */
 export async function listHistory(
   db: Db,
   userId: string,
   limit = 20
 ): Promise<Message[]> {
-  const rows = await db`
-    select * from messages
+  const rows = await db`select * from messages
     where user_id = ${userId}
     order by created_at desc, id desc
     limit ${limit}`;
-  return (rows as unknown as Message[]).reverse();
+  const messages = (rows as unknown as Message[]).reverse();
+  return redactMessageBodies(messages);
 }
 
 // ---------------------------------------------------------------------------
