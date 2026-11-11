@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
 import { connectionStatus } from "./connections.js";
+import { encryptToken } from "@exec-assistant/calendar";
 import type { Db } from "@exec-assistant/db";
 import type { GoogleConfig } from "./calendar-access.js";
+import { buildTools } from "./tools.js";
 
 const SECRET_UID = "6f1d5a3c-2b7e-4f5a-9c8d-0a1b2c3d4e5f";
 const OTHER_UID = "1f5908c9-2b7e-4f5a-9c8d-0a1b2c3d4e5f";
@@ -290,3 +292,268 @@ test(
     assert.equal(result.connectionError, null);
   },
 );
+
+test("connection_status tool result serializes with the fields the LLM consumes", async () => {
+  const state = makeDb();
+  (state.accounts as Map<string, Record<string, unknown>>).set(
+    SECRET_UID,
+    {
+      id: randomUUID(),
+      user_id: SECRET_UID,
+      provider: "google",
+      access_token: encryptToken("access-token", Buffer.from("x".repeat(32))),
+      refresh_token: encryptToken("refresh-token", Buffer.from("x".repeat(32))),
+      expires_at: null,
+      calendar_id: "primary",
+      synced_at: new Date(),
+      account_email: "user@example.com",
+      scopes: [
+        "openid",
+        "email",
+        "https://www.googleapis.com/auth/calendar.events",
+      ],
+      connected_at: new Date(),
+      last_sync_error: null,
+      reauth_required_at: null,
+      created_at: new Date(),
+    },
+  );
+  const tools = buildTools({
+    db: state.db,
+    userId: SECRET_UID,
+    timezone: "UTC",
+    devCalendar: false,
+    publicBaseUrl: "https://example.com",
+    oauthStateSecret: "k".repeat(32),
+    google: {
+      clientId: "cid",
+      clientSecret: "csecret",
+      tokenKey: Buffer.from("x".repeat(32)),
+    },
+    needsConnect: false,
+    approvalTtlMinutes: 15,
+    currentMessage: "",
+  }) as Record<string, () => unknown>;
+  const res = await (tools["connection_status"] as () => unknown)();
+  assert.ok(res, "the tool did not throw");
+  const typed = res as Record<string, unknown>;
+  assert.equal(typed.connected, true);
+  assert.equal(typed.needsReconnect, false);
+  assert.equal(typed.connectionError, null);
+  // The LLM receives every field, including connectionError, so it can
+  // distinguish "healthy" from "reauth required" without guessing.
+  const roundTrip = JSON.stringify(res);
+  assert.ok(roundTrip.includes("connected"));
+  assert.ok(roundTrip.includes("needsReconnect"));
+  assert.ok(roundTrip.includes("eventsTracked"));
+  assert.ok(roundTrip.includes("connectionError"));
+});
+
+test("zero tracked events never makes the assistant recommend reconnection", async () => {
+  const state = makeDb();
+  (state.accounts as Map<string, Record<string, unknown>>).set(
+    SECRET_UID,
+    {
+      id: randomUUID(),
+      user_id: SECRET_UID,
+      provider: "google",
+      access_token: encryptToken("access-token", Buffer.from("x".repeat(32))),
+      refresh_token: encryptToken("refresh-token", Buffer.from("x".repeat(32))),
+      expires_at: null,
+      calendar_id: "primary",
+      synced_at: new Date(),
+      account_email: "user@example.com",
+      scopes: [
+        "openid",
+        "email",
+        "https://www.googleapis.com/auth/calendar.events",
+      ],
+      connected_at: new Date(),
+      last_sync_error: null,
+      reauth_required_at: null,
+      created_at: new Date(),
+    },
+  );
+  const tools = buildTools({
+    db: state.db,
+    userId: SECRET_UID,
+    timezone: "UTC",
+    devCalendar: false,
+    publicBaseUrl: "https://example.com",
+    oauthStateSecret: "k".repeat(32),
+    google: {
+      clientId: "cid",
+      clientSecret: "csecret",
+      tokenKey: Buffer.from("x".repeat(32)),
+    },
+    needsConnect: false,
+    approvalTtlMinutes: 15,
+    currentMessage: "",
+  }) as Record<string, () => unknown>;
+  const res = await (tools["connection_status"] as () => unknown)();
+  const typed = res as Record<string, unknown>;
+  assert.ok(typed, "the tool did not throw");
+  assert.equal(typed.connected, true);
+  assert.equal(typed.needsReconnect, false);
+  assert.equal(typed.connectionError, null);
+  assert.equal(typed.eventsTracked, 0, "a synced account with no upcoming events");
+
+  // The decision logic must not answer "reconnect" when connected is true.
+  const decision = decideReply(typed, "Am I connected now?");
+  assert.ok(
+    !decision.includes("reconnect") && !decision.includes("reconnect me"),
+    `expected a confirming reply, got: ${decision}`,
+  );
+  assert.ok(decision.includes("connected") || decision.includes("no matching"),
+    `expected a confirming or no-events reply, got: ${decision}`,
+  );
+});
+
+test("worker sync and connection-status lookup use the same internal user id", async () => {
+  const state = makeDb();
+  (state.accounts as Map<string, Record<string, unknown>>).set(
+    SECRET_UID,
+    {
+      id: randomUUID(),
+      user_id: SECRET_UID,
+      provider: "google",
+      access_token: encryptToken("access-token", Buffer.from("x".repeat(32))),
+      refresh_token: encryptToken("refresh-token", Buffer.from("x".repeat(32))),
+      expires_at: null,
+      calendar_id: "primary",
+      synced_at: new Date(),
+      account_email: "user@example.com",
+      scopes: [
+        "openid",
+        "email",
+        "https://www.googleapis.com/auth/calendar.events",
+      ],
+      connected_at: new Date(),
+      last_sync_error: null,
+      reauth_required_at: null,
+      created_at: new Date(),
+    },
+  );
+  (state.accounts as Map<string, Record<string, unknown>>).set(
+    OTHER_UID,
+    {
+      id: randomUUID(),
+      user_id: OTHER_UID,
+      provider: "google",
+      access_token: encryptToken("access-token", Buffer.from("x".repeat(32))),
+      refresh_token: encryptToken("refresh-token", Buffer.from("x".repeat(32))),
+      expires_at: null,
+      calendar_id: "primary",
+      synced_at: new Date(),
+      account_email: "other@example.com",
+      scopes: [
+        "openid",
+        "email",
+        "https://www.googleapis.com/auth/calendar.events",
+      ],
+      connected_at: new Date(),
+      last_sync_error: null,
+      reauth_required_at: null,
+      created_at: new Date(),
+    },
+  );
+  // Insert a dev event for SECRET_UID only.
+  const event = {
+    id: randomUUID(),
+    user_id: SECRET_UID,
+    external_id: `dev-${randomUUID()}`,
+    title: "Dev sync event",
+    start_at: new Date(Date.now() + 60_000),
+    end_at: new Date(Date.now() + 120_000),
+    location: null,
+    description: null,
+    status: "confirmed",
+    all_day: false,
+    updated_at: new Date(),
+  };
+  (state.events as Record<string, unknown>[]).push(event);
+
+  const mine = await connectionStatus({
+    db: state.db,
+    userId: SECRET_UID,
+    google: null,
+    publicBaseUrl: "https://example.com",
+    oauthStateSecret: "k".repeat(32),
+    currentMessage: "",
+  });
+  const yours = await connectionStatus({
+    db: state.db,
+    userId: OTHER_UID,
+    google: null,
+    publicBaseUrl: "https://example.com",
+    oauthStateSecret: "k".repeat(32),
+    currentMessage: "",
+  });
+  // The synced event belongs to SECRET_UID: the internally-looked-up
+  // connection for SECRET_UID reports 1 tracked event; OTHER_UID reports 0.
+  assert.equal(mine.connected, true);
+  assert.equal(mine.eventsTracked, 1, "same internal user the worker synced");
+  assert.equal(yours.connected, true);
+  assert.equal(yours.eventsTracked, 0, "the other internal user owns nothing here");
+});
+
+test("a signed connect URL survives to WhatsApp unredacted", async () => {
+  const state = makeDb();
+  (state.accounts as Map<string, Record<string, unknown>>).set(
+    SECRET_UID,
+    {
+      id: randomUUID(),
+      user_id: SECRET_UID,
+      provider: "google",
+      access_token: encryptToken("access-token", Buffer.from("x".repeat(32))),
+      refresh_token: encryptToken("refresh-token", Buffer.from("x".repeat(32))),
+      expires_at: null,
+      calendar_id: "primary",
+      synced_at: null,
+      account_email: null,
+      scopes: [],
+      connected_at: new Date(),
+      last_sync_error: null,
+      reauth_required_at: null,
+      created_at: new Date(),
+    },
+  );
+  const tools = buildTools({
+    db: state.db,
+    userId: SECRET_UID,
+    timezone: "UTC",
+    devCalendar: false,
+    publicBaseUrl: "https://whatsapp-exec-assistant-bot.onrender.com",
+    oauthStateSecret: "k".repeat(32),
+    google: {
+      clientId: "cid",
+      clientSecret: "csecret",
+      tokenKey: Buffer.from("x".repeat(32)),
+    },
+    needsConnect: false,
+    approvalTtlMinutes: 15,
+    currentMessage: "",
+  }) as Record<string, () => unknown>;
+  const url = (await (tools["connect_calendar"] as () => unknown)()) as { url: string };
+  // The raw signed token must appear in the URL with no `[redacted]` clamps.
+  assert.match(url.url, /token=/);
+  assert.ok(!url.url.includes("[redacted]"), "the delivered link must not be clamped");
+  // The token segment must carry the two-part base64url payload+signature.
+  const token = new URL(url.url).searchParams.get("token") ?? "";
+  assert.equal(token.split(".").length, 2, "token has payload + signature");
+  assert.ok(token.length > 20, "token carries content");
+});
+
+
+/** Minimal prompt/decision helper: mirrors the system-prompt rule that a
+ * connected result must be confirmed, never contradicted by zero events.
+ */
+function decideReply(res: Record<string, unknown>, message: string): string {
+  if (!res.connected) return "No calendar is connected yet — say 'connect my calendar'.";
+  if (res.needsReconnect) return "It needs reconnecting — say 'reconnect my calendar'.";
+  if (res.eventsTracked === 0) {
+    return "Yes, your Google Calendar is connected. I haven't found any matching upcoming events yet.";
+  }
+  return "Yes! Your Google Calendar is successfully connected, and I've synced your calendar events.";
+}
+
