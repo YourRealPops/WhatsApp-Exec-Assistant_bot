@@ -231,26 +231,31 @@ export async function handleUserText(
     ];
   }
 
+  // A reply built by the model may embed a raw calendar link (the
+  // connect_calendar tool result carries one, and the model can copy it back.
+  // Clamp it in code only, in one place, before it is ever stored or sent.
+  const safeReply = redactQueryValues(reply);
+
   saved = await saveMessage(deps.db, {
     id: `out:${randomUUID()}`,
     userId: opts.userId,
     direction: "outbound",
-    body: redactQueryValues(reply),
+    body: safeReply,
   }) as boolean;
   if (!saved) {
     console.error(`[pipeline] failed to persist outbound for ${opts.phone}`);
   }
 
-  console.log(`[pipeline] → ${opts.phone} (${result.mode}): ${reply}`);
+  console.log(`[pipeline] → ${opts.phone} (${result.mode}): ${safeReply}`);
   if (buttons) {
     try {
-      await deps.sender.sendButtons(opts.phone, reply, buttons);
+      await deps.sender.sendButtons(opts.phone, safeReply, buttons);
     } catch (err) {
       console.error(`[pipeline] button send to ${opts.phone} failed:`, err);
-      await safeSend(deps, opts.phone, `${reply}\n\nReply yes to approve or no to reject.`);
+      await safeSend(deps, opts.phone, `${safeReply}\n\nReply yes to approve or no to reject.`);
     }
   } else {
-    await safeSend(deps, opts.phone, reply);
+    await safeSend(deps, opts.phone, safeReply);
   }
   return { ...result, reply };
 }
