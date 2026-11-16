@@ -156,42 +156,57 @@ export function buildTools(ctx: ToolContext): Record<string, ToolHandler> {
       return { date: dateStr, slots };
     },
 
-    create_event: async (args): Promise<CreateEventResult> => {
-      const title = String(args.title ?? "").trim();
-      if (!title) throw new Error("title is required");
-      const start = parseWhen(String(args.start ?? ""), tz);
-      const end = args.end
-        ? parseWhen(String(args.end), tz)
-        : new Date(start.getTime() + 3_600_000);
-      if (end.getTime() <= start.getTime()) {
-        throw new Error("end must be after start");
-      }
-      // Make `created` truthful: an upsert would otherwise claim creation for
-      // an event that already lived here. Ask first, then insert only if the
-      // event is genuinely new.
-      const externalId = `local:${randomUUID()}`;
-      const [dup] = await db`select * from events where user_id = ${userId} and external_id = ${externalId}`;
-      if (dup) {
-        return {
-          created: false,
-          title,
-          start: new Date(dup.start_at).toISOString(),
-          end: new Date(dup.end_at).toISOString(),
-          needsConnect,
-        };
-      }
-      const [row] = await db`
-        insert into events (user_id, external_id, title, start_at, end_at, location, description, status, updated_at)
-        values (${userId}, ${externalId}, ${title}, ${start}, ${end}, ${typeof args.location === "string" ? args.location : null}, "created by the assistant", "confirmed", now())
-      `;
-      return {
-        created: true,
-        title,
-        start: new Date(row.start_at).toISOString(),
-        end: new Date(row.end_at).toISOString(),
-        needsConnect,
-      };
-    },
+   
+create_event: async (args): Promise<CreateEventResult> => {
+  const title = String(args.title ?? "").trim();
+  if (!title) throw new Error("title is required");
+
+  const start = parseWhen(String(args.start ?? ""), tz);
+  const end = args.end
+    ? parseWhen(String(args.end), tz)
+    : new Date(start.getTime() + 3_600_000);
+
+  if (end.getTime() <= start.getTime()) {
+    throw new Error("end must be after start");
+  }
+
+  const externalId = `local:${randomUUID()}`;
+
+  const [row] = await db`
+    INSERT INTO events (
+      user_id,
+      external_id,
+      title,
+      start_at,
+      end_at,
+      location,
+      description,
+      status,
+      updated_at
+    )
+    VALUES (
+      ${userId},
+      ${externalId},
+      ${title},
+      ${start},
+      ${end},
+      ${typeof args.location === "string" ? args.location : null},
+      ${"created by the assistant"},
+      ${"confirmed"},
+      NOW()
+    )
+    RETURNING *
+  `;
+
+  return {
+    created: true,
+    title,
+    start: new Date(row.start_at).toISOString(),
+    end: new Date(row.end_at).toISOString(),
+    needsConnect,
+  };
+},
+
 
     set_reminder: async (args): Promise<SetReminderResult> => {
       const message = String(args.message ?? "").trim();
