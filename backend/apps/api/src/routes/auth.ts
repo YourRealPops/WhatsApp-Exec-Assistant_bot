@@ -137,6 +137,7 @@ export function authRouter(cfg: AuthConfig): Router {
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken ?? null,
         expiresAt: tokens.expiresAt ?? null,
+        scopes: tokens.scopes,
       });
 
       console.log(`[auth] google calendar connected for ${user.phone}`);
