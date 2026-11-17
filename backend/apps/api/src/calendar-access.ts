@@ -48,6 +48,22 @@ export async function connectedGoogleClient(
   });
 }
 
+/**
+ * Does the account actually hold the calendar.events permission Google
+ * granted? A full scope list is the only thing this write path needs; anything
+ * else is a reconnect, not a fallback to a local-only event.
+ */
+export async function assertCalendarEventsScope(
+  account: CalendarAccount,
+): Promise<void> {
+  const scopes =
+    account.scopes?.filter((s): s is string => typeof s === "string") ?? [];
+  if (scopes.some((s) => s.includes("calendar.events"))) return;
+  throw new Error(
+    "Calendar events scope is not granted or has been revoked. Reconnect Google Calendar with the calendar.events permission.",
+  );
+}
+
 /** Load the user's account or explain, in plain words, why we can't proceed. */
 export async function requireGoogleAccount(
   db: Db,

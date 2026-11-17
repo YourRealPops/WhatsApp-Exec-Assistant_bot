@@ -237,7 +237,7 @@ test("two users keep separate calendar connections", async () => {
 test("a worker sync marks the account connected, not disconnected", async () => {
   const state = makeDb();
   const synced = new Date("2026-11-11T11:59:00Z");
-  const event = new Date("2026-11-11T12:00:10Z");
+  const event = new Date(Date.now() + 3600_000); // 1 hour from now, inside the sync window
   const result = await status(state, SECRET_UID, google, false, synced, [event]);
   assert.equal(result.connected, true);
   assert.equal(result.needsReconnect, false);

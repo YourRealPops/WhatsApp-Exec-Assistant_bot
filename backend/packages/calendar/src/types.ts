@@ -15,6 +15,7 @@ export interface CalendarEvent {
 export interface CalendarClient {
   readonly provider: string;
   listEvents(from: Date, to: Date): Promise<CalendarEvent[]>;
+  insertEvent(input: { calendarId: string; requestBody: Record<string, unknown>; sendUpdates?: "all" | "none"; }): Promise<GoogleEventDetail>;
 }
 
 export interface GoogleEventDetail {

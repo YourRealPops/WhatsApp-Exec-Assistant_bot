@@ -31,7 +31,12 @@ import type {
   SetReminderResult,
   ToolHandler,
 } from "@exec-assistant/ai";
-import type { GoogleConfig } from "./calendar-access.js";
+import {
+  assertCalendarEventsScope,
+  connectedGoogleClient,
+  requireGoogleAccount,
+  type GoogleConfig,
+} from "./calendar-access.js";
 import {
   connectionStatus,
   disconnectCalendar,
@@ -56,6 +61,82 @@ export interface ToolContext {
   /** True when calendar writes are off; events created here are local-only
    *  until Google is connected. */
   needsConnect: boolean;
+}
+
+/** One Google Calendar API error, plus a small set of conditionally-backed
+ * extras that only Google v3 returns. Everything else is caught by the
+ * generic {@link CalendarError} branch.
+ */
+export class GoogleCalendarError extends Error {
+  readonly code: string;
+
+  constructor(message: string, code: string) {
+    super(message);
+    this.name = "GoogleCalendarError";
+    this.code = code;
+  }
+}
+
+/** Google's `401`/`403` with `invalid_grant`/`insufficient_scope` style text. */
+export class CalendarAuthError extends Error {
+  /** Reason Google gave: `invalid_grant`, `insufficient_scope`, etc. */
+  readonly reason: string;
+
+  /** The auth failure category: `auth` for auth errors. */
+  code: string;
+
+  constructor(message: string, reason: string) {
+    super(message);
+    this.name = "CalendarAuthError";
+    this.code = "auth";
+    this.reason = reason;
+  }
+}
+
+/** Google's `409` when the event already exists on the user's calendar. */
+export class CalendarConflictError extends Error {
+  constructor(message = "The event could not be created: a Google Calendar conflict occurred.") {
+    super(message);
+    this.name = "CalendarConflictError";
+  }
+}
+
+/** A write to Google Calendar was accepted but the returned object could not
+ * be read back. */
+export class CalendarWriteUnverifiedError extends Error {
+  constructor(message = "The event was created on Google Calendar, but I could not read it back to confirm.") {
+    super(message);
+    this.name = "CalendarWriteUnverifiedError";
+  }
+}
+
+/** Something about the Google Calendar write is out of ordinary conditions:
+ * a network error, a 5xx/429, or a timeout. The only safe next step is to
+ * retry the exact same call. */
+export class CalendarTransientError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CalendarTransientError";
+  }
+}
+
+/** Something about the Google Calendar credentials is out of ordinary
+ * conditions: no credentials, no access token, or the OAuth connection is
+ * missing. */
+export class CalendarSetupError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CalendarSetupError";
+  }
+}
+
+/** An error from the Google Calendar API that could not be mapped to one of
+ * the specific error classes above. */
+export class CalendarError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CalendarError";
+  }
 }
 
 const WORKDAY_START = "09:00";
@@ -170,7 +251,18 @@ create_event: async (args): Promise<CreateEventResult> => {
     throw new Error("end must be after start");
   }
 
-  const externalId = `local:${randomUUID()}`;
+  const account = await requireGoogleAccount(db, userId);
+  if (!ctx.google) {
+    throw new CalendarSetupError(
+      "No calendar credentials configured on this server; connect Google Calendar before creating events.",
+    );
+  }
+  await assertCalendarEventsScope(account);
+  const client = await connectedGoogleClient(ctx.google, db, account);
+
+  const externalId = `google:${randomUUID()}`;
+  const startIso = start.toISOString();
+  const endIso = end.toISOString();
 
   const [row] = await db`
     INSERT INTO events (
@@ -198,12 +290,64 @@ create_event: async (args): Promise<CreateEventResult> => {
     RETURNING *
   `;
 
+  const body: Record<string, unknown> = {
+    summary: title,
+    start: {
+      dateTime: startIso,
+      timeZone: account.timezone ?? "UTC",
+    },
+    end: {
+      dateTime: endIso,
+      timeZone: account.timezone ?? "UTC",
+    },
+  };
+  if (typeof args.location === "string" && args.location.trim() !== "") {
+    body.location = args.location;
+  }
+  if (typeof args.description === "string" && args.description.trim() !== "") {
+    body.description = args.description;
+  }
+
+  let googleEventId: string | null = null;
+  try {
+    const response = await client.insertEvent({
+      calendarId: account.calendar_id,
+      sendUpdates: "all",
+      requestBody: body,
+    });
+    googleEventId = response.event.externalId;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (err instanceof CalendarAuthError) {
+      console.error(`[create_event] Google calendar authorization failed for ${userId}: ${message}`);
+      throw err;
+    }
+    if (err instanceof CalendarTransientError) {
+      console.error(`[create_event] Google Calendar transient error for ${userId}: ${message}`);
+      throw err;
+    }
+    if (err instanceof CalendarConflictError) {
+      console.error(`[create_event] Google Calendar conflict for ${userId}: ${message}`);
+      await db`update events set status = 'failed', updated_at = now() where id = ${row.id}`;
+      throw err;
+    }
+    console.error(`[create_event] Google Calendar unexpected error for ${userId}: ${message}`);
+    throw err;
+  }
+
+  if (!googleEventId) {
+    console.error(`[create_event] Google Calendar did not return an event id for ${userId}`);
+    throw new CalendarWriteUnverifiedError();
+  }
+
+  await db`update events set external_id = ${googleEventId} where id = ${row.id}`;
+
   return {
     created: true,
     title,
     start: new Date(row.start_at).toISOString(),
     end: new Date(row.end_at).toISOString(),
-    needsConnect,
+    needsConnect: false,
   };
 },
 

@@ -1,3 +1,4 @@
+import type { GoogleEventDetail } from "./types.js";
 import type { CalendarClient, CalendarEvent } from "./types.js";
 
 /**
@@ -56,6 +57,9 @@ export function createDevClient(events?: CalendarEvent[]): CalendarClient {
     async listEvents(from, to) {
       const source = events ?? defaultDevEvents();
       return source.filter((e) => e.start >= from && e.start < to);
+    },
+    async insertEvent(input: { calendarId: string; requestBody: Record<string, unknown>; sendUpdates?: "all" | "none" }): Promise<GoogleEventDetail> {
+      throw new Error("Cannot create a Google event without real Google credentials");
     },
   };
 }

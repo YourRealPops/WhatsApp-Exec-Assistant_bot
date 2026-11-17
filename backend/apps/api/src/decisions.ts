@@ -22,7 +22,12 @@ import {
   GoogleEventDetail,
 } from "@exec-assistant/calendar";
 import type { AgentResult } from "@exec-assistant/ai";
-import { connectedGoogleClient, requireGoogleAccount, type GoogleConfig } from "./calendar-access.js";
+import {
+  assertCalendarEventsScope,
+  connectedGoogleClient,
+  requireGoogleAccount,
+  type GoogleConfig,
+} from "./calendar-access.js";
 import { formatRange } from "./when.js";
 
 /**
@@ -154,6 +159,7 @@ async function executeProposal(
         error: "google not configured",
       };
     }
+    await assertCalendarEventsScope(account);
     client = await connectedGoogleClient(deps.google, deps.db, account);
   } catch (err) {
     return {

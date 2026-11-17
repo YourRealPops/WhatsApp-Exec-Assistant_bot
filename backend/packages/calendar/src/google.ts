@@ -281,6 +281,11 @@ export function createGoogleClient(opts: GoogleClientOptions): CalendarClient & 
     end: Date;
     sendUpdates: "all" | "none";
   }): Promise<GoogleEventDetail>;
+  insertEvent(input: {
+    calendarId: string;
+    requestBody: Record<string, unknown>;
+    sendUpdates?: "all" | "none";
+  }): Promise<GoogleEventDetail>;
 } {
   let tokens = opts.tokens;
   const calendarId = encodeURIComponent(opts.calendarId ?? "primary");
@@ -435,6 +440,65 @@ export function createGoogleClient(opts: GoogleClientOptions): CalendarClient & 
       if (!res.ok) {
         throw new Error(
           `Google Calendar update failed (${res.status}): ${data?.error?.message ?? "unknown"}`,
+        );
+      }
+      const detail = mapGoogleEventDetail(data, timezone);
+      if (!detail) {
+        throw new TransientCalendarError(
+          "Google returned a response we could not read",
+        );
+      }
+      return detail;
+    },
+
+    async insertEvent(input): Promise<GoogleEventDetail> {
+      const headers: Record<string, string> = {
+        "Content-Type": "application/json",
+      };
+      if (input.sendUpdates) headers["X-Per-Client-User-Token"] = "true";
+
+      const url = new URL(`${CALENDAR_ENDPOINT}/${encodeURIComponent(input.calendarId ?? calendarId)}/events`);
+      url.searchParams.set("sendUpdates", input.sendUpdates ?? "all");
+      const body = JSON.stringify(input.requestBody);
+
+      let res: Response;
+      try {
+        res = await authorized((accessToken) =>
+          fetch(url, {
+            method: "POST",
+            headers: { ...headers, Authorization: `Bearer ${accessToken}` },
+            body,
+          }),
+        );
+      } catch (err) {
+        if (err instanceof CalendarAuthError) throw err;
+        throw new TransientCalendarError(
+          `Google Calendar create did not complete: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      const data = (await res.json().catch(() => ({}))) as Record<string, any>;
+      if (res.status === 409) {
+        throw new EventConflictError(
+          `Google Calendar rejected the duplicate event: ${data?.error?.message ?? "an event with these details already exists"}`,
+        );
+      }
+      if (res.status === 429 || res.status >= 500) {
+        throw new TransientCalendarError(
+          `Google Calendar create failed (${res.status}): the write state is unknown`,
+        );
+      }
+      if (res.status === 401 || res.status === 403) {
+        const error = data?.error ?? {};
+        const reason = typeof error?.reason === "string" ? error.reason : "unknown";
+        throw new CalendarAuthError(
+          `Google Calendar rejected the request (status ${res.status}): ${reason || "unauthorized"}`,
+          "invalid_token",
+        );
+      }
+      if (!res.ok) {
+        throw new Error(
+          `Google Calendar create failed (${res.status}): ${data?.error?.message ?? "unknown"}`,
         );
       }
       const detail = mapGoogleEventDetail(data, timezone);

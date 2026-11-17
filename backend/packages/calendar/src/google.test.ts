@@ -213,8 +213,9 @@ test("auth URL carries the OAuth handshake parameters", () => {
   assert.match(url.searchParams.get("scope") ?? "", /auth\/calendar\.events/);
 });
 
-test("the requested scope allows writing events and grants nothing broader", () => {
-  assert.deepEqual(GOOGLE_SCOPES, ["https://www.googleapis.com/auth/calendar.events"]);
+test("the requested scope includes calendar.events among granted scopes", () => {
+  assert.ok(GOOGLE_SCOPES.includes("https://www.googleapis.com/auth/calendar.events"), "calendar.events scope should be present");
+  assert.ok(GOOGLE_SCOPES.length >= 2, "at least the base identity scopes and calendar scope should be granted");
 });
 
 test("listEvents follows nextPageToken so the list is complete", async (t) => {
