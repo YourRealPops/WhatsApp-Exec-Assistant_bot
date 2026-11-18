@@ -11,7 +11,10 @@ import {
   startOfDayInTz,
   todayInTz,
 } from "@exec-assistant/calendar";
-import type { ProposeEventChangeResult } from "@exec-assistant/ai";
+import type {
+  ProposeEventCancellationResult,
+  ProposeEventChangeResult,
+} from "@exec-assistant/ai";
 import {
   connectedGoogleClient,
   requireGoogleAccount,
@@ -21,6 +24,45 @@ import { formatRange } from "./when.js";
 
 /** How far ahead an event may be to be reschedulable by title. */
 const SEARCH_DAYS = 14;
+
+/**
+ * Resolve "which event" once, for both proposals: an explicit external id
+ * wins, otherwise the title is matched against the user's upcoming events and
+ * an ambiguous match asks instead of guessing.
+ */
+async function resolveEventId(
+  ctx: ProposalContext,
+  args: Record<string, unknown>,
+  now: Date,
+  intent: "move" | "cancel",
+): Promise<string> {
+  const givenId = typeof args.event_id === "string" ? args.event_id.trim() : "";
+  if (givenId) return givenId;
+
+  const query = typeof args.event === "string" ? args.event.trim() : "";
+  if (!query) {
+    throw new Error(
+      intent === "cancel" ? "Which event should I cancel?" : "Which event should I move?",
+    );
+  }
+  const rows = await listUpcomingEvents(
+    ctx.db,
+    ctx.userId,
+    now,
+    new Date(now.getTime() + SEARCH_DAYS * 86_400_000),
+    200,
+  );
+  const needle = query.toLowerCase();
+  const matches = rows.filter((e) => e.title.toLowerCase().includes(needle));
+  if (matches.length === 0) {
+    throw new Error(`I couldn't find an event matching "${query}".`);
+  }
+  if (matches.length > 1) {
+    const names = matches.slice(0, 3).map((m) => m.title).join(", ");
+    throw new Error(`That matches ${matches.length} events (${names}). Which one?`);
+  }
+  return matches[0].external_id;
+}
 
 export interface ProposalContext {
   db: Db;
@@ -52,30 +94,7 @@ export async function proposeEventChange(
   }
   const client = await connectedGoogleClient(ctx.google, ctx.db, account);
 
-  const givenId = typeof args.event_id === "string" ? args.event_id.trim() : "";
-  const query = typeof args.event === "string" ? args.event.trim() : "";
-
-  let eventId = givenId;
-  if (!eventId) {
-    if (!query) throw new Error("Which event should I move?");
-    const rows = await listUpcomingEvents(
-      ctx.db,
-      ctx.userId,
-      now,
-      new Date(now.getTime() + SEARCH_DAYS * 86_400_000),
-      200,
-    );
-    const needle = query.toLowerCase();
-    const matches = rows.filter((e) => e.title.toLowerCase().includes(needle));
-    if (matches.length === 0) {
-      throw new Error(`I couldn't find an event matching "${query}".`);
-    }
-    if (matches.length > 1) {
-      const names = matches.slice(0, 3).map((m) => m.title).join(", ");
-      throw new Error(`That matches ${matches.length} events (${names}). Which one?`);
-    }
-    eventId = matches[0].external_id;
-  }
+  const eventId = await resolveEventId(ctx, args, now, "move");
 
   // Read it from Google, not from our copy: the refusal rules and the ETag
   // must reflect the provider's current state.
@@ -129,6 +148,7 @@ export async function proposeEventChange(
 
   const attendees = detail.attendees;
   const payload: ProposalPayload = {
+    action: "reschedule",
     eventId,
     calendarId: account.calendar_id,
     title: before.title,
@@ -169,8 +189,91 @@ export async function proposeEventChange(
     proposalId: proposal.id,
     message: lines.join("\n"),
     before: payload.before,
-    after: payload.after,
+    after: payload.after as { start: string; end: string },
     conflictWarning,
+    attendees,
+    notifiesAttendees: attendees > 0,
+    expiresInMinutes: ctx.approvalTtlMinutes,
+  };
+}
+
+/**
+ * Turn "cancel my Trials Students meeting" into a stored proposal.
+ *
+ * Like a reschedule, this never writes to Google: it reads the event to refuse
+ * what cannot be cancelled and to capture the ETag the user is approving, then
+ * stops. The delete happens in decisions.ts, only after an explicit approval.
+ */
+export async function proposeEventCancellation(
+  ctx: ProposalContext,
+  args: Record<string, unknown>,
+): Promise<ProposeEventCancellationResult> {
+  const now = ctx.now ?? new Date();
+  const account = await requireGoogleAccount(ctx.db, ctx.userId);
+  if (!ctx.google) {
+    throw new Error(
+      "Calendar changes are not configured on this server (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET and TOKEN_ENCRYPTION_KEY).",
+    );
+  }
+  const client = await connectedGoogleClient(ctx.google, ctx.db, account);
+
+  const eventId = await resolveEventId(ctx, args, now, "cancel");
+
+  const detail = await client.getEvent(eventId);
+  if (!detail) throw new Error("That event is no longer in your Google Calendar.");
+
+  const before = detail.event;
+  if (detail.rawStatus === "cancelled") {
+    throw new Error(`"${before.title}" is already cancelled.`);
+  }
+  if (before.end.getTime() <= now.getTime()) {
+    throw new Error(
+      `"${before.title}" is already over (${formatRange(before.start, before.end, ctx.timezone)}), so there is nothing to cancel.`,
+    );
+  }
+  if (!detail.organizerSelf && !detail.guestsCanModify) {
+    throw new Error(`You don't have edit rights on "${before.title}" — Google would refuse the change.`);
+  }
+
+  const attendees = detail.attendees;
+  const payload: ProposalPayload = {
+    action: "cancellation",
+    eventId,
+    calendarId: account.calendar_id,
+    title: before.title,
+    before: {
+      start: before.start.toISOString(),
+      end: before.end.toISOString(),
+    },
+    etag: detail.etag,
+    timezone: ctx.timezone,
+    attendees,
+    sendUpdates: attendees > 0 ? "all" : "none",
+  };
+
+  const expiresAt = new Date(now.getTime() + ctx.approvalTtlMinutes * 60_000);
+  const proposal = await createProposal(ctx.db, {
+    userId: ctx.userId,
+    kind: "cancellation",
+    payload,
+    payloadHash: hashPayload(payload),
+    expiresAt,
+  });
+
+  const lines = [
+    `Proposed cancellation: "${before.title}"`,
+    `When: ${formatRange(before.start, before.end, ctx.timezone)}`,
+    attendees > 0
+      ? `${attendees} guest${attendees === 1 ? "" : "s"} will be notified by Google.`
+      : "No guests to notify.",
+    "Nothing changes until you approve. This expires in " +
+      `${ctx.approvalTtlMinutes} minutes.`,
+  ];
+
+  return {
+    proposalId: proposal.id,
+    message: lines.join("\n"),
+    before: payload.before,
     attendees,
     notifiesAttendees: attendees > 0,
     expiresInMinutes: ctx.approvalTtlMinutes,

@@ -7,6 +7,7 @@ import {
 } from "./llm.js";
 import { toolDefinitionFor } from "./tools.js";
 import { runFallbackAgent } from "./fallback.js";
+import { routeCalendarIntent } from "./dispatch.js";
 
 export interface ToolExecution {
   name: string;
@@ -87,7 +88,7 @@ export function buildSystemPrompt(opts: {
     `Use bullet lines like "- 09:00 Board review" when listing things.`,
     `Always call the provided tools before answering anything about the calendar, availability or reminders.`,
     `Include the UTC offset when you state a time, e.g. "14:00+01:00".`,
-    `You cannot change the calendar yourself. To move an event times, call propose_event_change; it stores the exact change and sends Approve/Reject buttons. Never say an event was moved, created or deleted in Google until a tool result says it was verified.`,
+    `You cannot change the calendar yourself. To move an event times, call propose_event_change; to remove one, call propose_event_cancellation. Both store the exact change and send Approve/Reject buttons. Never say an event was moved, created or deleted in Google until a tool result says it was verified.`,
     `Before sending a connect link, say in plain words what Google will ask for: permission to "view and edit your calendar events" — and that nothing in the calendar changes without the user's approval.`,
     `"What's connected" → connection_status. "Manage my connections" → manage_connections. Disconnecting is two steps: ask first, and only call disconnect_calendar with confirm=true after the user says yes.`,
     `If a tool fails, say so in one line and offer the best alternative.`,
@@ -122,6 +123,50 @@ export async function runAgent(deps: AgentDeps): Promise<AgentResult> {
     return runLlmAgent(deps, deps.llm as LlmConfig);
   }
   return runFallbackAgent(deps);
+}
+
+/**
+ * Route a calendar intention before the model sees it. A message that names a
+ * cancel or reschedule — and the event it applies to — goes straight to that
+ * tool, so the model can never convert one intent into the other. Everything
+ * else (including Approve/Reject, which is decided before this point) goes to
+ * the normal agent.
+ */
+export async function dispatchOrRun(deps: AgentDeps, userMessage: string): Promise<AgentResult> {
+  const route = routeCalendarIntent(userMessage);
+  if (!route) return runAgent(deps);
+
+  const handler = deps.tools[route.name];
+  // A deployment without the proposing tool keeps the conversation intact
+  // rather than failing a route it cannot serve.
+  if (!handler) return runAgent(deps);
+
+  try {
+    const result = await handler(route.args);
+    const execution: ToolExecution = { name: route.name, args: route.args, result, ok: true };
+    deps.onToolCall?.(execution);
+    // A proposal always sends its own exact wording; the user approves the
+    // text they can see, and that text is the change that was stored.
+    const message = (result as { message?: unknown } | null)?.message;
+    return {
+      reply: typeof message === "string" && message ? message : "Done.",
+      toolCalls: [execution],
+      mode: "fallback",
+    };
+  } catch (err) {
+    const execution: ToolExecution = {
+      name: route.name,
+      args: route.args,
+      result: { error: err instanceof Error ? err.message : String(err) },
+      ok: false,
+    };
+    deps.onToolCall?.(execution);
+    return {
+      reply: `I couldn't do that: ${err instanceof Error ? err.message : String(err)}`,
+      toolCalls: [execution],
+      mode: "fallback",
+    };
+  }
 }
 
 async function runLlmAgent(deps: AgentDeps, llm: LlmConfig): Promise<AgentResult> {

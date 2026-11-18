@@ -58,7 +58,16 @@ export interface ParsedDecision {
   proposalId?: string;
 }
 
-const BUTTON_ID = /^(appr|rej):([0-9a-f-]{36})$/i;
+/** `appr:<id>` / `rej:<id>`. The id shape is not trusted here — ownership and
+ * status are always re-read from the database before anything happens. */
+const BUTTON_ID = /^(appr|rej):([0-9a-f-]{8,})$/i;
+
+/** The message is nothing but a yes, give or take "please". */
+const APPROVE_ONLY =
+  /^(?:yes|y|yeah|yep|yup|ok|okay|sure|approve|approved|confirm|confirmed|do it|go ahead|sounds good|let'?s do it)\b[\s!.,]*(?:please)?[\s!.,]*$/i;
+/** The message is nothing but a no. "cancel my meeting" is not a rejection. */
+const REJECT_ONLY =
+  /^(?:no|n|nope|reject|rejected|decline|cancel|don'?t|stop|hold off)\b[\s!.,]*(?:please)?[\s!.,]*$/i;
 
 /**
  * A tap is unambiguous. Typed text only counts as a decision when exactly one
@@ -78,17 +87,20 @@ export function parseDecision(
   }
   const trimmed = text.trim();
   if (!trimmed) return null;
-  if (/^(yes|y|yeah|yep|yup|approve|approved|ok|okay|confirm|do it|go ahead)\b/i.test(trimmed) && !/\bno\b/i.test(trimmed)) {
-    return { action: "approve" };
-  }
-  if (/^(no|n|nope|reject|rejected|cancel|don'?t|stop)\b/i.test(trimmed)) {
-    return { action: "reject" };
-  }
+  // The whole message must be the decision. A prefix match would read
+  // "cancel my meeting" as a rejection of whatever is pending.
+  if (APPROVE_ONLY.test(trimmed)) return { action: "approve" };
+  if (REJECT_ONLY.test(trimmed)) return { action: "reject" };
   return null;
 }
 
 function message(reply: string): AgentResult {
   return { reply, toolCalls: [], mode: "decision" };
+}
+
+/** What the proposal does, in the past tense, for replies about it. */
+function doneVerb(proposal: Proposal): string {
+  return proposal.payload.action === "cancellation" ? "cancelled" : "moved";
 }
 
 function stateReply(proposal: Proposal): AgentResult {
@@ -99,7 +111,9 @@ function stateReply(proposal: Proposal): AgentResult {
     case "rejected":
       return message(`You already declined that change to "${title}" — nothing was written.`);
     case "expired":
-      return message(`That request expired, so nothing was changed. Ask me again if you still want "${title}" moved.`);
+      return message(
+        `That request expired, so nothing was changed. Ask me again if you still want "${title}" ${doneVerb(proposal)}.`,
+      );
     case "executing":
       return message(`I'm still working on "${title}" — give me a moment and check it again.`);
     case "failed":
@@ -124,13 +138,17 @@ interface ExecutionOutcome {
   detail: GoogleEventDetail | null;
   reply: string;
   error?: string;
+  /** The event is gone from Google: the local copy is cancelled, not refreshed. */
+  deleted?: boolean;
 }
+
+type GoogleClient = Awaited<ReturnType<typeof connectedGoogleClient>>;
 
 function wroteIntended(
   detail: GoogleEventDetail | null,
   payload: ProposalPayload,
 ): boolean {
-  if (!detail) return false;
+  if (!detail || !payload.after) return false;
   return (
     detail.event.start.getTime() === new Date(payload.after.start).getTime() &&
     detail.event.end.getTime() === new Date(payload.after.end).getTime()
@@ -170,13 +188,28 @@ async function executeProposal(
     };
   }
 
+  if (payload.action === "cancellation") {
+    return executeCancellation(client, payload);
+  }
+  if (!payload.after) {
+    // Only possible for a hand-edited row: `after` is written for every
+    // reschedule. Refuse instead of throwing and leaving it in `executing`.
+    return {
+      ok: false,
+      detail: null,
+      reply: "Nothing was changed: that request has no new time stored, so there is nothing to apply.",
+      error: "payload missing after",
+    };
+  }
+  const after = payload.after;
+
   let ambiguous = false;
   try {
     await client.patchEventTimes({
       eventId: payload.eventId,
       etag: payload.etag,
-      start: new Date(payload.after.start),
-      end: new Date(payload.after.end),
+      start: new Date(after.start),
+      end: new Date(after.end),
       sendUpdates: payload.sendUpdates,
     });
   } catch (err) {
@@ -218,7 +251,7 @@ async function executeProposal(
     return {
       ok: true,
       detail: verified,
-      reply: `Done. Verified in Google Calendar: "${payload.title}" is now ${formatRange(new Date(payload.after.start), new Date(payload.after.end), payload.timezone)}.${
+      reply: `Done. Verified in Google Calendar: "${payload.title}" is now ${formatRange(new Date(after.start), new Date(after.end), payload.timezone)}.${
         payload.attendees > 0
           ? ` Google is notifying ${payload.attendees} guest${payload.attendees === 1 ? "" : "s"}.`
           : ""
@@ -233,6 +266,86 @@ async function executeProposal(
       ? `I couldn't confirm the change: Google didn't answer cleanly and the event does not read as moved. ${currentState(verified, payload)}`
       : `Google accepted it but the event still reads differently. ${currentState(verified, payload)}`,
     error: ambiguous ? "unverified write (timeout/5xx)" : "verification mismatch",
+  };
+}
+
+/**
+ * Apply an approved cancellation: delete the event, then read it back. Success
+ * is only reported when Google says it is gone, so a failed or ambiguous
+ * delete can never be announced as a cancellation.
+ */
+async function executeCancellation(
+  client: GoogleClient,
+  payload: ProposalPayload,
+): Promise<ExecutionOutcome> {
+  const was = formatRange(
+    new Date(payload.before.start),
+    new Date(payload.before.end),
+    payload.timezone,
+  );
+  const guests =
+    payload.attendees > 0
+      ? ` Google is notifying ${payload.attendees} guest${payload.attendees === 1 ? "" : "s"}.`
+      : "";
+  const gone = (): ExecutionOutcome => ({
+    ok: true,
+    detail: null,
+    deleted: true,
+    reply: `Done. Verified in Google Calendar: "${payload.title}" (${was}) is gone.${guests}`,
+  });
+
+  try {
+    await client.deleteEvent({
+      eventId: payload.eventId,
+      etag: payload.etag,
+      sendUpdates: payload.sendUpdates,
+    });
+  } catch (err) {
+    if (err instanceof EventConflictError) {
+      const current = await client.getEvent(payload.eventId).catch(() => null);
+      return {
+        ok: false,
+        detail: current,
+        reply: `Nothing was changed: the event changed in Google since the proposal was made, so I did not delete it. ${currentState(current, payload)}`,
+        error: "etag mismatch (event changed)",
+      };
+    }
+    if (err instanceof CalendarAuthError) {
+      return {
+        ok: false,
+        detail: null,
+        reply:
+          "Nothing was changed: Google rejected the calendar permission. Reconnect and I'll try again.",
+        error: "google auth rejected",
+      };
+    }
+    if (err instanceof TransientCalendarError) {
+      // The delete may have landed. Re-read before deciding anything.
+      const current = await client.getEvent(payload.eventId).catch(() => null);
+      if (!current || current.rawStatus === "cancelled") return gone();
+      return {
+        ok: false,
+        detail: current,
+        reply: `I couldn't confirm the cancellation: Google didn't answer cleanly and the event is still there. ${currentState(current, payload)}`,
+        error: "unverified delete (timeout/5xx)",
+      };
+    }
+    const current = await client.getEvent(payload.eventId).catch(() => null);
+    return {
+      ok: false,
+      detail: current,
+      reply: `Nothing was changed: ${err instanceof Error ? err.message : String(err)}. ${currentState(current, payload)}`,
+      error: err instanceof Error ? err.message : "provider error",
+    };
+  }
+
+  const verified = await client.getEvent(payload.eventId).catch(() => null);
+  if (!verified || verified.rawStatus === "cancelled") return gone();
+  return {
+    ok: false,
+    detail: verified,
+    reply: `Google accepted the delete but the event is still in your calendar. ${currentState(verified, payload)}`,
+    error: "verification mismatch",
   };
 }
 
@@ -275,9 +388,10 @@ export async function handleDecision(
   if (proposal.status !== "pending") return stateReply(proposal);
 
   if (proposal.expires_at.getTime() <= now.getTime()) {
+    const title = proposal.payload.title;
     await failProposalSafely(deps, proposal, "expired", "expired");
     return message(
-      `That request expired, so nothing was changed. Ask me again if you still want "${proposal.payload.title}" moved.`,
+      `That request expired, so nothing was changed. Ask me again if you still want "${title}" ${doneVerb(proposal)}.`,
     );
   }
 
@@ -363,6 +477,21 @@ export async function handleDecision(
     return message(outcome.reply);
   }
 
+  if (outcome.deleted) {
+    await finishProposal(deps.db, claimed.id, {
+      status: "succeeded",
+      providerResult: { deleted: true, eventId: claimed.payload.eventId },
+    });
+    await logProposalEvent(deps.db, {
+      proposalId: claimed.id,
+      from: "executing",
+      to: "succeeded",
+      detail: "deleted and verified in google calendar",
+    }).catch(() => {});
+    await markCancelledLocally(deps, claimed);
+    return message(outcome.reply);
+  }
+
   const detail = outcome.detail as GoogleEventDetail;
   await finishProposal(deps.db, claimed.id, {
     status: "succeeded",
@@ -413,6 +542,36 @@ export async function handleDecision(
   }
 
   return message(outcome.reply);
+}
+
+/**
+ * After a verified delete: mark the local copy cancelled and drop the pending
+ * reminder ladder, in one statement, so no reminder rings for a gone event.
+ * A local failure here never turns a confirmed cancellation into an error —
+ * the next sync reconciles the copy.
+ */
+async function markCancelledLocally(
+  deps: DecisionDeps,
+  proposal: Proposal,
+): Promise<void> {
+  try {
+    await deps.db`
+      with gone as (
+        update events
+        set status = 'cancelled', updated_at = now()
+        where user_id = ${proposal.user_id}
+          and external_id = ${proposal.payload.eventId}
+        returning id
+      )
+      delete from reminders
+      where event_id in (select id from gone)
+        and status = 'pending'`;
+  } catch (err) {
+    console.error(
+      `[decision] local cancel failed after ${proposal.id} succeeded:`,
+      err instanceof Error ? err.message : err,
+    );
+  }
 }
 
 /** Before the event has been touched we only have the proposed "before" state. */

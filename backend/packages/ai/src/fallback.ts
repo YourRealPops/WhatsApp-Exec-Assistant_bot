@@ -196,7 +196,9 @@ export async function runFallbackAgent(deps: AgentDeps): Promise<AgentResult> {
       return reply("I couldn't create a calendar link just now — try again in a moment.");
     }
     return reply(
-      `Google will ask for permission to view and edit your calendar events. Nothing changes without your approval.\nOpen this link within ${probe.expiresInMinutes} minutes to connect Google Calendar:`,
+      `Google will ask for permission to view and edit your calendar events. Nothing changes without your approval.
+Open this link within ${probe.expiresInMinutes} minutes to connect Google Calendar:
+${probe.url}`
     );
   }
 
@@ -242,3 +244,4 @@ export async function runFallbackAgent(deps: AgentDeps): Promise<AgentResult> {
     "I didn't catch that without an LLM key.\n" + HELP,
   );
 }
+

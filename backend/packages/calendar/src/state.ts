@@ -49,6 +49,19 @@ function sign(payload: string, secret: string): string {
   return createHmac("sha256", secret).update(payload).digest("base64url");
 }
 
+/**
+ * Compare the signature we computed with the one presented, as text. Base64url
+ * decoding silently ignores the padding bits of the final character, so two
+ * different strings can decode to the same bytes — comparing the decoded
+ * buffers would accept a tampered signature. Comparing the characters does not.
+ */
+function signatureMatches(encoded: string, provided: string, secret: string): boolean {
+  const expected = Buffer.from(sign(encoded, secret), "utf8");
+  const actual = Buffer.from(provided, "utf8");
+  if (expected.length !== actual.length) return false;
+  return timingSafeEqual(expected, actual);
+}
+
 function parsePayload(raw: string): StatePayload | null {
   let parsed: unknown;
   try {
@@ -111,10 +124,7 @@ export function verifyState(opts: {
   const [encoded, provided] = parts;
   if (!encoded || !provided) return null;
 
-  const expected = Buffer.from(sign(encoded, opts.secret), "base64url");
-  const actual = Buffer.from(provided, "base64url");
-  if (expected.length !== actual.length) return null;
-  if (!timingSafeEqual(expected, actual)) return null;
+  if (!signatureMatches(encoded, provided, opts.secret)) return null;
 
   const payload = parsePayload(Buffer.from(encoded, "base64url").toString("utf8"));
   if (!payload) return null;
@@ -148,10 +158,9 @@ export function verifyStateReason(opts: {
   const [encoded, provided] = parts;
   if (!encoded || !provided) return { ok: false, reason: "malformed", minutes: 0 };
 
-  const expected = Buffer.from(sign(encoded, opts.secret), "base64url");
-  const actual = Buffer.from(provided, "base64url");
-  if (expected.length !== actual.length) return { ok: false, reason: "bad_signature", minutes: 0 };
-  if (!timingSafeEqual(expected, actual)) return { ok: false, reason: "bad_signature", minutes: 0 };
+  if (!signatureMatches(encoded, provided, opts.secret)) {
+    return { ok: false, reason: "bad_signature", minutes: 0 };
+  }
 
   let payload: StatePayload | null = null;
   try {

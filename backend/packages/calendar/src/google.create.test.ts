@@ -15,6 +15,8 @@ function tokens(input: Partial<OAuthTokens> = {}): OAuthTokens {
   return {
     accessToken: "access-1",
     refreshToken: "rt",
+    // Inside the 60s refresh-ahead window, so building a client with the
+    // default tokens performs one silent refresh before its first call.
     expiresAt: new Date(Date.now() + 60_000),
     ...input,
   };
@@ -82,7 +84,6 @@ test("insertEvent posts to the events.insert URL and returns the id", async (t) 
   assert.equal(result.event.title, "Board review");
   assert.equal(result.event.location, "Boardroom");
 
-  console.error('URL check:', calls[0]);
   // First call is the token refresh to oauth2.googleapis.com; the insertEvent
   // POST is the second call.
   const url = new URL(calls[1]);
@@ -128,7 +129,9 @@ test("insertEvent refreshes once and retries when Google answers 401", async (t)
   const client = createGoogleClient({
     clientId: "cid",
     clientSecret: "csecret",
-    tokens: tokens(),
+    // Outside the refresh-ahead window, so the only refresh here is the one
+    // the 401 forces — that count is what this test is about.
+    tokens: tokens({ expiresAt: new Date(Date.now() + 5 * 60_000) }),
     onTokenRefresh: (tokens) => { persisted.push(tokens); },
   });
 
@@ -156,7 +159,6 @@ test("insertEvent refreshes once and retries when Google answers 401", async (t)
   assert.ok(calls.some((c) => c.includes("www.googleapis.com/calendar/v3/calendars/primary/events")), "first API call was made");
   assert.ok(calls.filter((c) => c.includes("www.googleapis.com/calendar/v3/calendars/primary/events")).length === 2, "API called twice (401 then retry) after refresh");
   assert.ok(calls.some((c) => c.includes("oauth2.googleapis.com/token")), "token refresh was called again after 401");
-  console.error('DEBUG persisted:', persisted.length, persisted.map(p => p.accessToken));
   assert.equal(persisted.length, 1, "the refreshed token is handed back to be persisted");
   assert.equal((client as any).getTokens().accessToken, "access-2");
 });
@@ -191,7 +193,9 @@ test("insertEvent fails with EventConflictError on a 409", async (t) => {
   const client = createGoogleClient({
     clientId: "cid",
     clientSecret: "csecret",
-    tokens: tokens(),
+    // No silent refresh here: the stub answers every request with 409, so a
+    // token call would be read as the conflict instead of the insert.
+    tokens: tokens({ expiresAt: new Date(Date.now() + 5 * 60_000) }),
     calendarId: "primary",
   });
 

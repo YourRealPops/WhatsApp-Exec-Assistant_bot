@@ -156,6 +156,14 @@ const MIGRATIONS: string[] = [
     used_at timestamptz not null default now()
   );
   `,
+  `
+  -- Cancelling an event is a proposal too, so the kind check has to allow it
+  -- as well as a reschedule. Dropped by name so both a fresh schema and an
+  -- existing one end up with exactly the same constraint.
+  alter table proposals drop constraint if exists proposals_kind_check;
+  alter table proposals add constraint proposals_kind_check
+    check (kind in ('reschedule', 'cancellation'));
+  `,
 ];
 
 export const MIGRATION_COUNT = MIGRATIONS.length;

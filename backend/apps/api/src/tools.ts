@@ -22,6 +22,7 @@ import type {
   ConnectionStatusResult,
   CreateEventResult,
   DisconnectResult,
+  ProposeEventCancellationResult,
   FindFreeTimeResult,
   ListEventsResult,
   ListRemindersResult,
@@ -42,7 +43,7 @@ import {
   disconnectCalendar,
   manageConnections,
 } from "./connections.js";
-import { proposeEventChange } from "./proposals.js";
+import { proposeEventCancellation, proposeEventChange } from "./proposals.js";
 
 export interface ToolContext {
   db: Db;
@@ -439,6 +440,20 @@ create_event: async (args): Promise<CreateEventResult> => {
 
     propose_event_change: async (args): Promise<ProposeEventChangeResult> =>
       proposeEventChange(
+        {
+          db,
+          userId,
+          timezone: tz,
+          google: ctx.google ?? null,
+          approvalTtlMinutes: ctx.approvalTtlMinutes ?? 15,
+        },
+        args,
+      ),
+
+    propose_event_cancellation: async (
+      args,
+    ): Promise<ProposeEventCancellationResult> =>
+      proposeEventCancellation(
         {
           db,
           userId,

@@ -13,8 +13,8 @@ import { redactQueryValues } from "@exec-assistant/ai";
 
 import {
   buildSystemPrompt,
+  dispatchOrRun,
   parseProfile,
-  runAgent,
   type AgentResult,
   type LlmConfig,
   type LlmMessage,
@@ -198,7 +198,7 @@ export async function handleUserText(
     currentMessage: opts.text,
   });
 
-  const result = await runAgent({
+  const result = await dispatchOrRun({
     llm: deps.llm,
     systemPrompt: buildSystemPrompt({
       timezone,
@@ -213,12 +213,15 @@ export async function handleUserText(
       console.log(
         `[agent] ${exec.name}(${JSON.stringify(exec.args)}) → ${exec.ok ? "ok" : `error: ${JSON.stringify(exec.result)}`}`,
       ),
-  });
+  }, opts.text);
 
   // A created proposal is always delivered verbatim, with the buttons that
   // decide it: the exact change the user approves is the exact change stored.
   const proposal = result.toolCalls.find(
-    (call) => call.name === "propose_event_change" && call.ok,
+    (call) =>
+      call.ok &&
+      (call.name === "propose_event_change" ||
+        call.name === "propose_event_cancellation"),
   )?.result as { proposalId?: string; message?: string } | undefined;
   let reply = result.reply;
   let buttons: Button[] | undefined;

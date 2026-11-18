@@ -281,6 +281,13 @@ export function createGoogleClient(opts: GoogleClientOptions): CalendarClient & 
     end: Date;
     sendUpdates: "all" | "none";
   }): Promise<GoogleEventDetail>;
+  /** Delete one event. Resolves when Google confirms it is gone — including
+   *  when it was already gone (404): a retry of the same delete is harmless. */
+  deleteEvent(input: {
+    eventId: string;
+    etag?: string | null;
+    sendUpdates?: "all" | "none";
+  }): Promise<void>;
   insertEvent(input: {
     calendarId: string;
     requestBody: Record<string, unknown>;
@@ -449,6 +456,51 @@ export function createGoogleClient(opts: GoogleClientOptions): CalendarClient & 
         );
       }
       return detail;
+    },
+
+    /**
+     * Delete one event, conditional on the ETag the user approved when we have
+     * one. Google answers 410 for an event that is already gone, which is the
+     * outcome the user asked for, so both 404 and 410 count as success.
+     */
+    async deleteEvent(input): Promise<void> {
+      const url = new URL(eventUrl(input.eventId));
+      if (input.sendUpdates) url.searchParams.set("sendUpdates", input.sendUpdates);
+      const headers: Record<string, string> = {};
+      if (input.etag) headers["If-Match"] = input.etag;
+
+      let res: Response;
+      try {
+        res = await authorized((accessToken) =>
+          fetch(url, {
+            method: "DELETE",
+            headers: { ...headers, Authorization: `Bearer ${accessToken}` },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof CalendarAuthError) throw err;
+        throw new TransientCalendarError(
+          `Google Calendar delete did not complete: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      if (res.ok || res.status === 404 || res.status === 410) return;
+      const data = (await res.json().catch(() => ({}))) as Record<string, any>;
+      if (res.status === 412) throw new EventConflictError();
+      if (res.status === 429 || res.status >= 500) {
+        throw new TransientCalendarError(
+          `Google Calendar delete failed (${res.status}): the write state is unknown`,
+        );
+      }
+      if (res.status === 401 || res.status === 403) {
+        throw new CalendarAuthError(
+          `Google Calendar rejected the delete (status ${res.status}): ${data?.error?.message ?? "unauthorized"}`,
+          "invalid_token",
+        );
+      }
+      throw new Error(
+        `Google Calendar delete failed (${res.status}): ${data?.error?.message ?? "unknown"}`,
+      );
     },
 
     async insertEvent(input): Promise<GoogleEventDetail> {

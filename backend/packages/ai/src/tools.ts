@@ -146,14 +146,14 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: "propose_event_change",
       description:
-        "Propose new start/end times for an existing event. This never changes anything: it stores the exact change and sends the user Approve/Reject buttons. Use it for every reschedule request — never say an event was moved before the tool reports it succeeded.",
+        "Propose new start/end times for an existing timed event. This never changes anything: it stores the exact change and sends the user Approve/Reject buttons. Use it for every reschedule request — never say an event was moved before the tool reports it succeeded.",
       parameters: {
         type: "object",
         properties: {
           event: {
             type: "string",
-            description:
-              "Which event, by title or a distinctive part of it (e.g. \"board review\").",
+           description:
+              "Which timed event, by title or a distinctive part of it (e.g. \"board review\").",
           },
           event_id: {
             type: "string",
@@ -169,6 +169,29 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           },
         },
         required: ["start"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "propose_event_cancellation",
+      description:
+        "Propose removing a single timed calendar event. This never touches Google: it stores the exact cancellation and sends the user Approve/Reject buttons. Use it for every cancel/delete request that names an event — never say an event was cancelled before the tool reports it succeeded.",
+      parameters: {
+        type: "object",
+        properties: {
+          event: {
+            type: "string",
+            description:
+              "Which timed event to cancel, by title or a distinctive part of it (e.g. \"Trials Students\").",
+          },
+          event_id: {
+            type: "string",
+            description: "External event id from list_events, when known. Preferred over a title.",
+          },
+        },
+        required: ["event"],
       },
     },
   },
@@ -279,6 +302,17 @@ export interface ProposeEventChangeResult {
   before: { start: string; end: string };
   after: { start: string; end: string };
   conflictWarning: string | null;
+  attendees: number;
+  /** Google will notify guests when this executes. */
+  notifiesAttendees: boolean;
+  expiresInMinutes: number;
+}
+
+export interface ProposeEventCancellationResult {
+  proposalId: string;
+  /** The exact cancellation, formatted for the chat — send this text as-is. */
+  message: string;
+  before: { start: string; end: string };
   attendees: number;
   /** Google will notify guests when this executes. */
   notifiesAttendees: boolean;

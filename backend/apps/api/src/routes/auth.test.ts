@@ -123,7 +123,9 @@ test("tampered, expired, wrong-purpose and missing tokens get the same 400", asy
       `${base}/auth/google?token=`,
       `${base}/auth/google?token=nonsense`,
       `${base}/auth/google?token=${forgedPayload}.${signature}`,
-      `${base}/auth/google?token=${payload}.${signature.slice(0, -1)}A`,
+      // Flip the last signature character to a different one — appending "A"
+      // would leave the token untouched whenever it already ended in "A".
+      `${base}/auth/google?token=${payload}.${signature.slice(0, -1)}${signature.endsWith("A") ? "B" : "A"}`,
       `${base}/auth/google?token=${signState({
         secret: SECRET,
         uid: UID,

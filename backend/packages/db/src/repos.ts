@@ -481,17 +481,34 @@ export type ProposalStatus =
 
 /** The exact change a user is approving — stored, hashed and executed verbatim. */
 export interface ProposalPayload {
+  /**
+   * What this proposal does. Absent means "reschedule": rows written before
+   * cancellation existed are reschedules, and they keep the same hash.
+   */
+  action?: "reschedule" | "cancellation";
   eventId: string;
   calendarId: string;
   title: string;
   before: { start: string; end: string };
-  after: { start: string; end: string };
+  /** Present for a reschedule only — a cancellation has no new times. */
+  after?: { start: string; end: string };
   /** ETag of the event when the proposal was made; the write is conditional on it. */
   etag: string | null;
   timezone: string;
   /** Guests on the event: drives Google's sendUpdates on execution. */
   attendees: number;
   sendUpdates: "all" | "none";
+}
+
+export type ProposalKind = "reschedule" | "cancellation";
+
+/**
+ * A jsonb parameter. Passing an already stringified value here would be
+ * double-encoded by the driver (a JSON string, not an object), which is what
+ * made stored payloads fail their own hash check.
+ */
+function jsonb(db: Db, value: unknown): ReturnType<Db["json"]> {
+  return db.json(value as Parameters<Db["json"]>[0]);
 }
 
 export interface Proposal {
@@ -509,11 +526,28 @@ export interface Proposal {
   error: string | null;
 }
 
+/**
+ * Rows written before the jsonb encoding fix hold the payload as a JSON
+ * string. Parsing it here keeps those proposals hash-verifiable instead of
+ * turning them into unreadable objects.
+ */
+function normalizeProposal(row: Proposal | undefined): Proposal | null {
+  if (!row) return null;
+  if (typeof row.payload === "string") {
+    try {
+      row.payload = JSON.parse(row.payload as unknown as string) as Proposal["payload"];
+    } catch {
+      // Left as-is: the hash check will refuse it, which is the safe outcome.
+    }
+  }
+  return row;
+}
+
 export async function createProposal(
   db: Db,
   input: {
     userId: string;
-    kind?: "reschedule";
+    kind?: ProposalKind;
     payload: ProposalPayload;
     payloadHash: string;
     expiresAt: Date;
@@ -522,7 +556,7 @@ export async function createProposal(
   const rows = await db`
     insert into proposals (user_id, kind, payload, payload_hash, expires_at)
     values (${input.userId}, ${input.kind ?? "reschedule"},
-            ${JSON.stringify(input.payload)}::jsonb, ${input.payloadHash},
+            ${jsonb(db, input.payload)}, ${input.payloadHash},
             ${input.expiresAt})
     returning *`;
   return rows[0] as unknown as Proposal;
@@ -533,7 +567,7 @@ export async function getProposal(
   id: string
 ): Promise<Proposal | null> {
   const rows = await db`select * from proposals where id = ${id}`;
-  return (rows[0] as unknown as Proposal) ?? null;
+  return normalizeProposal(rows[0] as unknown as Proposal);
 }
 
 export async function listPendingProposals(
@@ -547,7 +581,9 @@ export async function listPendingProposals(
       and status = 'pending'
       and expires_at > ${now}
     order by created_at desc`;
-  return rows as unknown as Proposal[];
+  return (rows as unknown as Proposal[])
+    .map((row) => normalizeProposal(row))
+    .filter((row): row is Proposal => row !== null);
 }
 
 /**
@@ -568,7 +604,7 @@ export async function claimProposal(
       and status = 'pending'
       and expires_at > ${now}
     returning *`;
-  return (rows[0] as unknown as Proposal) ?? null;
+  return normalizeProposal(rows[0] as unknown as Proposal);
 }
 
 export async function rejectProposal(
@@ -584,7 +620,7 @@ export async function rejectProposal(
       and status = 'pending'
       and expires_at > ${now}
     returning *`;
-  return (rows[0] as unknown as Proposal) ?? null;
+  return normalizeProposal(rows[0] as unknown as Proposal);
 }
 
 /** Terminal state for an execution attempt that already claimed the proposal. */
@@ -602,8 +638,8 @@ export async function finishProposal(
     set status = ${result.status},
         executed_at = now(),
         provider_result = ${
-          result.providerResult ? JSON.stringify(result.providerResult) : null
-        }::jsonb,
+          result.providerResult ? jsonb(db, result.providerResult) : null
+        },
         error = ${result.error ?? null}
     where id = ${id} and status = 'executing'`;
 }

@@ -1,5 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import {
   getProposal,
   listPendingProposals,
@@ -21,12 +22,15 @@ import {
   CalendarAuthError,
   EventConflictError,
   TransientCalendarError,
-  GoogleEventDetail,
-  mapGoogleEventDetail,
+  encryptToken,
 } from "@exec-assistant/calendar";
 import { handleDecision, parseDecision } from "./decisions.js";
 
 const SECRET = "s".repeat(32);
+/** At-rest token key for the fake connection below. */
+const TOKEN_KEY = Buffer.alloc(32, 7);
+const GOOGLE = { clientId: "id", clientSecret: "secret", tokenKey: TOKEN_KEY };
+
 const UID = "6f1d5a3c-2b7e-4f5a-9c8d-0a1b2c3d4e5f";
 const OTHER_UID = "2b7e4f5a-9c8d-0a1b-2c3d-4e5f6a7b8c9d";
 
@@ -46,7 +50,9 @@ function makeFakeDb() {
   }
 
   const db = ((sql: TemplateStringsArray, ...values: unknown[]) => {
-    const text = sql.join("?");
+    // The repo formats its SQL across lines; compare single-spaced text so a
+    // statement is recognised wherever the line breaks fall.
+    const text = sql.join("?").replace(/\s+/g, " ");
     const v = values.map((x) =>
       typeof x === "bigint" ? x.toString() : x ?? null,
     ) as unknown[];
@@ -88,11 +94,14 @@ function makeFakeDb() {
       return Promise.resolve([p]);
     }
     if (text.includes("update proposals set status = 'failed'")) {
-      const id = v[0] as string;
+      // failProposal: (error, id)
+      const id = v[1] as string;
       const p = proposals.find((x) => x.id === id);
       if (!p) return Promise.resolve([]);
-      if (p.status === "pending") p.status = "failed";
-      if (p.status === "executing") p.status = "failed";
+      if (p.status === "pending" || p.status === "executing") {
+        p.status = "failed";
+        p.error = String(v[0]);
+      }
       return Promise.resolve([]);
     }
     if (text.includes("update proposals set status = 'expired'")) {
@@ -100,26 +109,33 @@ function makeFakeDb() {
       const p = findProposalById(id);
       if (!p || p.status !== "pending") return Promise.resolve([]);
       p.status = "expired";
-      p.decided_at = v[1] as Date;
+      p.decided_at = new Date();
       return Promise.resolve([p]);
     }
     if (text.includes("update proposals set status = ")) {
-      // finishProposal / other updates.
-      const id = v[0] as string;
+      // finishProposal: (status, providerResult, error, id), only from executing.
+      const status = v[0] as Proposal["status"];
+      const id = v[3] as string;
       const p = findProposalById(id);
-      if (p && text.includes("status = 'succeeded'")) p.status = "succeeded";
-      if (p && text.includes("status = 'failed'")) p.status = "failed";
+      if (p && p.status === "executing") {
+        p.status = status;
+        p.provider_result = v[1] as Record<string, unknown> | null;
+        p.error = (v[2] as string | null) ?? null;
+        p.executed_at = new Date();
+      }
       return Promise.resolve([]);
     }
     if (text.includes("insert into proposals")) {
+      // createProposal passes (userId, kind, payloadJson, payloadHash, expiresAt)
+      // and the table supplies the id — mirror that, not the argument order.
       const row = {
-        id: v[0] as string,
-        user_id: v[1] as string,
-        kind: v[2] as string,
-        payload: v[3] as unknown,
-        payload_hash: v[4] as string,
+        id: randomUUID(),
+        user_id: v[0] as string,
+        kind: (v[1] as string) ?? "reschedule",
+        payload: (typeof v[2] === "string" ? JSON.parse(v[2]) : v[2]) as Proposal["payload"],
+        payload_hash: v[3] as string,
         status: "pending" as const,
-        expires_at: v[5] as Date,
+        expires_at: v[4] as Date,
         created_at: new Date(),
         decided_at: null,
         executed_at: null,
@@ -190,6 +206,10 @@ function makeFakeDb() {
     return Promise.resolve([]);
   }) as unknown as Db;
 
+  // postgres.js serialises jsonb parameters through db.json(); the fake stores
+  // the value as-is, which is what the driver ends up putting in the column.
+  (db as unknown as { json: (value: unknown) => unknown }).json = (value) => value;
+
   return { db, proposals, calendarAccounts, events };
 }
 
@@ -213,11 +233,11 @@ function makeGoogleStub() {
       const eventId = url.match(/\/events\/([^/?#]+)/)?.[1];
       if (!eventId) throw new Error(`unexpected google url: ${url}`);
       if (method === "PATCH") {
-        const res = s.patchResult;
-        return new Response(JSON.stringify(res), { status: 200 });
+        const res = s._patch as { status: number; body: unknown };
+        return new Response(JSON.stringify(res.body), { status: res.status });
       }
-      const res = s.getResult;
-      return new Response(JSON.stringify(res), { status: 200 });
+      const res = s._get as { status: number; body: unknown };
+      return new Response(JSON.stringify(res.body), { status: res.status });
     },
     patchResult: (status: number, body: unknown) => {
       s._patch = { status, body };
@@ -231,19 +251,45 @@ function makeGoogleStub() {
   return s;
 }
 
-function patchDetail(body: Record<string, unknown>): GoogleEventDetail {
-  return mapGoogleEventDetail({
-    id: body.id ?? "evt-1",
-    summary: body.summary ?? "Board review",
-    start: { dateTime: body.start ?? body.after_start ?? "", timeZone: body.timezone ?? "UTC" },
-    end: { dateTime: body.end ?? body.after_end ?? "", timeZone: body.timezone ?? "UTC" },
-    etag: body.etag ?? "\"abc123\"",
-    attendees: body.attendees ?? 0,
-    organizer: { self: true },
-    guestsCanModify: false,
-    status: "confirmed",
-  } as Record<string, unknown>, "UTC") as GoogleEventDetail;
+/**
+ * A connected account row, exactly as `getCalendarAccount` returns it, so the
+ * approve path can reach the (stubbed) Google API instead of stopping at "no
+ * calendar is connected". Tokens are stored encrypted, as the app does.
+ */
+function connectGoogle(
+  calendarAccounts: Record<string, unknown>[],
+  userId: string,
+): void {
+  calendarAccounts.push({
+    id: randomUUID(),
+    user_id: userId,
+    provider: "google",
+    access_token: encryptToken("access-token", TOKEN_KEY),
+    refresh_token: null,
+    expires_at: null,
+    calendar_id: "primary",
+    synced_at: null,
+    account_email: null,
+    scopes: ["https://www.googleapis.com/auth/calendar.events"],
+    connected_at: new Date(),
+    last_sync_error: null,
+    reauth_required_at: null,
+    created_at: new Date(),
+    timezone: "Europe/London",
+  });
 }
+
+/** The event as Google returns it once the reschedule has landed. */
+const MOVED_EVENT = {
+  id: "evt-1",
+  summary: "Board review",
+  start: { dateTime: "2026-10-26T09:00:00+01:00", timeZone: "Europe/London" },
+  end: { dateTime: "2026-10-26T10:00:00+01:00", timeZone: "Europe/London" },
+  etag: '"abc123"',
+  organizer: { self: true },
+  guestsCanModify: false,
+  status: "confirmed",
+};
 
 test("parseDecision routes accept into approve", () => {
   assert.equal(parseDecision("ok", null)?.action, "approve");
@@ -346,8 +392,16 @@ test("a proposal whose payload hash no longer matches is refused", async () => {
   assert.equal((await getProposal(db as unknown as Db, proposal.id))!.status, "failed");
 });
 
-test("a second tap on an already-decided proposal is a no-op", async () => {
-  const { db } = makeFakeDb();
+test("a second tap on an already-decided proposal is a no-op", async (t) => {
+  const { db, calendarAccounts } = makeFakeDb();
+  connectGoogle(calendarAccounts, UID);
+  const realFetch = globalThis.fetch;
+  const google = makeGoogleStub();
+  google.getResult(200, MOVED_EVENT);
+  (globalThis.fetch as unknown) = google.fetch;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
   const payload = {
     eventId: "evt-1",
     calendarId: "primary",
@@ -367,11 +421,11 @@ test("a second tap on an already-decided proposal is a no-op", async () => {
     expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
   });
   await handleDecision(
-    { db: db as unknown as Db, google: null as any, now: () => new Date() },
+    { db: db as unknown as Db, google: GOOGLE, now: () => new Date() },
     { userId: UID, text: "ok", replyId: `appr:${proposal.id}` },
   );
   const second = await handleDecision(
-    { db: db as unknown as Db, google: null as any, now: () => new Date() },
+    { db: db as unknown as Db, google: GOOGLE, now: () => new Date() },
     { userId: UID, text: "ok", replyId: `appr:${proposal.id}` },
   );
   assert.ok(second);
@@ -408,8 +462,13 @@ test("a tap on a proposal owned by another user is rejected as not theirs", asyn
   assert.equal((await getProposal(db as unknown as Db, proposal.id))!.status, "pending");
 });
 
-test("a stale ETag is refused and reports Google's current state", async () => {
-  const { db } = makeFakeDb();
+test("a stale ETag is refused and reports Google's current state", async (t) => {
+  const { db, calendarAccounts } = makeFakeDb();
+  connectGoogle(calendarAccounts, UID);
+  const realFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
   const payload = {
     eventId: "evt-1",
     calendarId: "primary",
@@ -429,39 +488,13 @@ test("a stale ETag is refused and reports Google's current state", async () => {
     expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
   });
   const google = makeGoogleStub();
-  const client = {
-    getEvent: async () =>
-      patchDetail({
-        id: "evt-1",
-        summary: "Board review",
-        start: { dateTime: "2026-10-26T09:30:00+01:00" },
-        end: { dateTime: "2026-10-26T10:30:00+01:00" },
-        etag: "\"abc123\"",
-        attendees: 0,
-        organizer: { self: true },
-        guestsCanModify: false,
-        status: "confirmed",
-      }),
-    patchEventTimes: async () => {
-      google.patchResult(
-        412,
-        patchDetail({
-          id: "evt-1",
-          summary: "Board review",
-          start: { dateTime: "2026-10-26T09:30:00+01:00" },
-          end: { dateTime: "2026-10-26T10:30:00+01:00" },
-          etag: "\"abc123\"",
-          attendees: 0,
-          organizer: { self: true },
-          guestsCanModify: false,
-          status: "confirmed",
-        }),
-      );
-    },
-  };
+  // Google refuses the conditional write: the event changed since approval, and
+  // the re-read shows it at a time the user never approved.
+  google.patchResult(412, { error: { message: "Precondition Failed" } });
+  google.getResult(200, MOVED_EVENT);
   (globalThis.fetch as ReturnType<typeof makeGoogleStub>["fetch"]) = google.fetch as any;
   const result = await handleDecision(
-    { db: db as unknown as Db, google: { clientId: "id", clientSecret: "secret", tokenKey: Buffer.alloc(32) }, now: () => new Date() },
+    { db: db as unknown as Db, google: GOOGLE, now: () => new Date() },
     { userId: UID, text: "ok", replyId: `appr:${proposal.id}` },
   );
   assert.ok(result);
@@ -471,8 +504,13 @@ test("a stale ETag is refused and reports Google's current state", async () => {
   assert.equal((await getProposal(db as unknown as Db, proposal.id))!.status, "failed");
 });
 
-test("a transient Google error is reconciled by re-reading before deciding", async () => {
-  const { db } = makeFakeDb();
+test("a transient Google error is reconciled by re-reading before deciding", async (t) => {
+  const { db, calendarAccounts } = makeFakeDb();
+  connectGoogle(calendarAccounts, UID);
+  const realFetch = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
   const payload = {
     eventId: "evt-1",
     calendarId: "primary",
@@ -491,49 +529,97 @@ test("a transient Google error is reconciled by re-reading before deciding", asy
     payloadHash: hashPayload(payload),
     expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
   });
-  const google = makeGoogleStub();
   let callCount = 0;
   (globalThis.fetch as ReturnType<typeof makeGoogleStub>["fetch"]) = async () => {
     callCount += 1;
-    if (callCount === 1) {
-      google.patchResult(
-        500,
-        patchDetail({
-          id: "evt-1",
-          summary: "Board review",
-          start: { dateTime: "2026-10-26T09:00:00+01:00" },
-          end: { dateTime: "2026-10-26T10:00:00+01:00" },
-          etag: "\"abc123\"",
-          attendees: 0,
-          organizer: { self: true },
-          guestsCanModify: false,
-          status: "confirmed",
-        }),
-      );
-      return new Response(JSON.stringify({}), { status: 500 });
-    }
-    google.getResult(
-      200,
-      patchDetail({
-        id: "evt-1",
-        summary: "Board review",
-        start: { dateTime: "2026-10-26T09:00:00+01:00" },
-        end: { dateTime: "2026-10-26T10:00:00+01:00" },
-        etag: "\"abc123\"",
-        attendees: 0,
-        organizer: { self: true },
-        guestsCanModify: false,
-        status: "confirmed",
-      }),
-    );
-    return new Response(JSON.stringify({}), { status: 200 });
+    // The PATCH times out with a 500; the follow-up read shows the write
+    // actually landed, so the change must be reported as done.
+    if (callCount === 1) return new Response(JSON.stringify({}), { status: 500 });
+    return new Response(JSON.stringify(MOVED_EVENT), { status: 200 });
   };
   const result = await handleDecision(
-    { db: db as unknown as Db, google: { clientId: "id", clientSecret: "secret", tokenKey: Buffer.alloc(32) }, now: () => new Date() },
+    { db: db as unknown as Db, google: GOOGLE, now: () => new Date() },
     { userId: UID, text: "ok", replyId: `appr:${proposal.id}` },
   );
   assert.ok(result);
   assert.ok((result as { reply: string }).reply);
   assert.match((result as { reply: string }).reply, /Done/i);
   assert.equal((await getProposal(db as unknown as Db, proposal.id))!.status, "succeeded");
+});
+
+const CANCEL_PAYLOAD = {
+  action: "cancellation" as const,
+  eventId: "evt-1",
+  calendarId: "primary",
+  title: "Trials Students",
+  before: { start: "2026-10-25T15:00:00+01:00", end: "2026-10-25T16:00:00+01:00" },
+  etag: '"abc123"',
+  timezone: "Africa/Lagos",
+  attendees: 2,
+  sendUpdates: "all" as const,
+};
+
+test("an approved cancellation deletes the event and verifies it is gone", async (t) => {
+  const { db, calendarAccounts } = makeFakeDb();
+  connectGoogle(calendarAccounts, UID);
+  const realFetch = globalThis.fetch;
+  const google = makeGoogleStub();
+  // DELETE succeeds (204) and the follow-up read is a 404: it really is gone.
+  google.getResult(404, { error: { message: "Not Found" } });
+  (globalThis.fetch as ReturnType<typeof makeGoogleStub>["fetch"]) = google.fetch as any;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const proposal = await createProposal(db, {
+    userId: UID,
+    kind: "cancellation",
+    payload: CANCEL_PAYLOAD,
+    payloadHash: hashPayload(CANCEL_PAYLOAD),
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+  });
+  const result = await handleDecision(
+    { db: db as unknown as Db, google: GOOGLE, now: () => new Date() },
+    { userId: UID, text: "ok", replyId: `appr:${proposal.id}` },
+  );
+  assert.ok(result);
+  assert.match(result.reply, /is gone/i);
+  assert.match(result.reply, /Trials Students/);
+  assert.equal((await getProposal(db as unknown as Db, proposal.id))!.status, "succeeded");
+});
+
+test("a cancellation Google did not apply is never reported as done", async (t) => {
+  const { db, calendarAccounts } = makeFakeDb();
+  connectGoogle(calendarAccounts, UID);
+  const realFetch = globalThis.fetch;
+  const google = makeGoogleStub();
+  // Google answers the DELETE, but the event is still there afterwards.
+  google.getResult(200, {
+    id: "evt-1",
+    summary: "Trials Students",
+    start: { dateTime: "2026-10-25T15:00:00+01:00" },
+    end: { dateTime: "2026-10-25T16:00:00+01:00" },
+    etag: '"abc123"',
+    status: "confirmed",
+  });
+  (globalThis.fetch as ReturnType<typeof makeGoogleStub>["fetch"]) = google.fetch as any;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const proposal = await createProposal(db, {
+    userId: UID,
+    kind: "cancellation",
+    payload: CANCEL_PAYLOAD,
+    payloadHash: hashPayload(CANCEL_PAYLOAD),
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+  });
+  const result = await handleDecision(
+    { db: db as unknown as Db, google: GOOGLE, now: () => new Date() },
+    { userId: UID, text: "ok", replyId: `appr:${proposal.id}` },
+  );
+  assert.ok(result);
+  assert.doesNotMatch(result.reply, /Done/);
+  assert.match(result.reply, /still in your calendar/i);
+  assert.equal((await getProposal(db as unknown as Db, proposal.id))!.status, "failed");
 });
