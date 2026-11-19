@@ -105,3 +105,92 @@ export function todayInTz(tz: string, now: Date = new Date()): string {
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${p.year}-${pad(p.month)}-${pad(p.day)}`;
 }
+
+/** The wall-clock time of `date` in `tz`, as "HH:mm". */
+export function clockInTz(date: Date, tz: string): string {
+  const p = partsInTz(date, tz);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(p.hour)}:${pad(p.minute)}`;
+}
+
+const WEEKDAYS = [
+  "sunday",
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+];
+
+/**
+ * Parse the way people say times in chat ("10a.m tomorrow", "4 PM",
+ * "tomorrow at 09:30", "next friday 3pm") into the UTC instant they mean,
+ * interpreting every wall-clock part in `tz` — never twice, and never in the
+ * server's timezone.
+ *
+ * ISO-ish input is handed straight to {@link parseWhen}, so a caller may pass
+ * either form.
+ */
+export function parseSpokenWhen(
+  value: string,
+  tz: string,
+  now: Date = new Date(),
+): Date {
+  const raw = value
+    .trim()
+    .replace(/[.!?]+$/, "")
+    .replace(/\b(?:instead|please)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!raw) throw new Error("Unrecognised time: empty");
+  if (HAS_OFFSET.test(raw) || /^\d{4}-\d{2}-\d{2}/.test(raw)) {
+    return parseWhen(raw, tz);
+  }
+
+  const lower = raw.toLowerCase();
+  const today = todayInTz(tz, now);
+  let dateStr = today;
+
+  if (/\bday\s+after\s+tomorrow\b/.test(lower)) {
+    dateStr = addDaysToDateStr(today, 2);
+  } else if (/\btomorrow\b/.test(lower)) {
+    dateStr = addDaysToDateStr(today, 1);
+  } else if (/\btoday\b|\btonight\b/.test(lower)) {
+    dateStr = today;
+  } else {
+    const weekday = WEEKDAYS.findIndex((name) =>
+      new RegExp(`\\b${name}\\b`).test(lower),
+    );
+    if (weekday >= 0) {
+      const p = partsInTz(now, tz);
+      const current = new Date(Date.UTC(p.year, p.month - 1, p.day)).getUTCDay();
+      // The next occurrence: "Friday" on a Friday means next week, because a
+      // time already behind us is never the one the user meant.
+      const delta = ((weekday - current + 7) % 7) || 7;
+      dateStr = addDaysToDateStr(today, delta);
+    }
+  }
+
+  let hour: number | null = null;
+  let minute = 0;
+  const spelled = /\b(noon|midday|midnight)\b/i.exec(lower);
+  if (spelled) {
+    hour = spelled[1].toLowerCase() === "midnight" ? 0 : 12;
+  } else {
+    const clock = /(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?/i.exec(raw);
+    if (clock) {
+      hour = Number(clock[1]);
+      minute = Number(clock[2] ?? 0);
+      const meridiem = clock[3]?.toLowerCase().replace(/\./g, "");
+      if (meridiem === "pm" && hour < 12) hour += 12;
+      if (meridiem === "am" && hour === 12) hour = 0;
+    }
+  }
+  if (hour === null || hour > 23 || minute > 59) {
+    throw new Error(`Unrecognised time: ${value}`);
+  }
+
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return parseWhen(`${dateStr}T${pad(hour)}:${pad(minute)}`, tz);
+}

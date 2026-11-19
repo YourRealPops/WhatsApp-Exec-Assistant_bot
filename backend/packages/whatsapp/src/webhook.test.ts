@@ -71,6 +71,71 @@ test("is idempotent-safe: message ids are preserved for dedupe", () => {
   );
 });
 
+test("a proposal button tap carries its own id, not the button label", () => {
+  const proposalId = "9a7c1f0e-1c2b-4d3e-8f90-123456789abc";
+  const buttonPayload = {
+    entry: [
+      {
+        changes: [
+          {
+            value: {
+              messages: [
+                {
+                  from: "15551234567",
+                  id: "wamid.TAP1",
+                  timestamp: "1730000010",
+                  type: "interactive",
+                  interactive: {
+                    button_reply: {
+                      id: `appr:${proposalId}`,
+                      title: "Approve",
+                    },
+                  },
+                },
+                {
+                  from: "15551234567",
+                  id: "wamid.TAP2",
+                  timestamp: "1730000011",
+                  type: "interactive",
+                  interactive: {
+                    button_reply: {
+                      id: `rej:${proposalId}`,
+                      title: "Reject",
+                    },
+                  },
+                },
+                {
+                  from: "15551234567",
+                  id: "wamid.TAP3",
+                  timestamp: "1730000012",
+                  type: "button",
+                  button: { text: "Approve", payload: `appr:${proposalId}` },
+                },
+                {
+                  from: "15551234567",
+                  id: "wamid.TAP4",
+                  timestamp: "1730000013",
+                  type: "interactive",
+                  interactive: {
+                    list_reply: { id: `rej:${proposalId}`, title: "Reject" },
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  const [approve, reject, legacy, list] = parseInboundMessages(buttonPayload);
+  assert.equal(approve.replyId, `appr:${proposalId}`);
+  assert.equal(approve.text, "Approve", "the label is copy, never the id");
+  assert.equal(reject.replyId, `rej:${proposalId}`);
+  assert.equal(legacy.replyId, `appr:${proposalId}`);
+  assert.equal(list.replyId, `rej:${proposalId}`);
+});
+
 test("never throws on malformed payloads", () => {
   assert.deepEqual(parseInboundMessages(null), []);
   assert.deepEqual(parseInboundMessages("nope"), []);

@@ -153,11 +153,21 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           event: {
             type: "string",
            description:
-              "Which timed event, by title or a distinctive part of it (e.g. \"board review\").",
+              "Which timed event, by title or a distinctive part of it (e.g. \"board review\"). Omit it when the user refers to an event by position or clock time.",
           },
           event_id: {
             type: "string",
             description: "External event id from list_events, when known. Preferred over a title.",
+          },
+          time: {
+            type: "string",
+            description:
+              "Clock the user named for the event, e.g. \"9 PM\" or \"21:00\", when the title alone is not enough.",
+          },
+          ordinal: {
+            type: "number",
+            description:
+              "1-based position in the last listing (1 for \"the first one\", 2 for \"the second one\", -1 for \"the last one\").",
           },
           start: {
             type: "string",
@@ -184,11 +194,21 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           event: {
             type: "string",
             description:
-              "Which timed event to cancel, by title or a distinctive part of it (e.g. \"Trials Students\").",
+              "Which timed event to cancel, by title or a distinctive part of it (e.g. \"Trials Students\"). Omit it when the user refers to an event by position or clock time.",
           },
           event_id: {
             type: "string",
             description: "External event id from list_events, when known. Preferred over a title.",
+          },
+          time: {
+            type: "string",
+            description:
+              "Clock the user named for the event, e.g. \"9 PM\" or \"21:00\", when the title alone is not enough.",
+          },
+          ordinal: {
+            type: "number",
+            description:
+              "1-based position in the last listing (1 for \"the first one\", 2 for \"the second one\", -1 for \"the last one\").",
           },
         },
         required: ["event"],
@@ -236,6 +256,19 @@ export interface EventSlot {
   title: string;
   start: string;
   end: string;
+  /**
+   * The start already rendered in the user's timezone, e.g.
+   * "Thu 19 Nov, 21:00". Quote this; never convert offsets by hand.
+   */
+  startLocal?: string;
+  /** The end clock in the user's timezone, e.g. "22:00". */
+  endLocal?: string;
+  /** The whole range in the user's timezone, offset included. */
+  display?: string;
+  /** IANA zone the local fields are rendered in. */
+  timezone?: string;
+  /** Offset label for this instant, e.g. "+01:00". */
+  offset?: string;
   /** Date-only event: show "All day" instead of a clock time. */
   allDay?: boolean;
   location?: string | null;
@@ -243,6 +276,8 @@ export interface EventSlot {
 
 export interface ListEventsResult {
   date: string;
+  /** IANA zone every local/display field in this result is rendered in. */
+  timezone?: string;
   events: EventSlot[];
 }
 

@@ -164,6 +164,26 @@ const MIGRATIONS: string[] = [
   alter table proposals add constraint proposals_kind_check
     check (kind in ('reschedule', 'cancellation'));
   `,
+  `
+  -- The last calendar listing a user was shown. "Remove the 9 PM one" and
+  -- "move the second meeting" refer to these rows, not to a guessed first
+  -- search result: each listing replaces the previous one, and the stable
+  -- Google event id is what a proposal ends up storing. focused_at records
+  -- the event a proposal last pointed at, so "it" has one safe antecedent.
+  create table if not exists event_references (
+    id uuid primary key default gen_random_uuid(),
+    user_id uuid not null references users(id) on delete cascade,
+    position int not null,
+    external_id text not null,
+    title text not null,
+    start_at timestamptz not null,
+    end_at timestamptz not null,
+    listed_at timestamptz not null default now(),
+    focused_at timestamptz
+  );
+  create index if not exists event_references_user_idx
+    on event_references (user_id, position);
+  `,
 ];
 
 export const MIGRATION_COUNT = MIGRATIONS.length;

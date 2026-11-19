@@ -56,11 +56,20 @@ export interface ParsedDecision {
   action: DecisionAction;
   /** Present for button taps; absent for a typed yes/no. */
   proposalId?: string;
+  /**
+   * A typed `approve <id>` decision, matched as a prefix against the user's
+   * pending proposals. Used when one turn created several proposals and each
+   * must be decided on its own.
+   */
+  idPrefix?: string;
 }
 
 /** `appr:<id>` / `rej:<id>`. The id shape is not trusted here — ownership and
  * status are always re-read from the database before anything happens. */
 const BUTTON_ID = /^(appr|rej):([0-9a-f-]{8,})$/i;
+
+/** `approve 3f2a1b9c` / `reject 3f2a1b9c` — one specific waiting change. */
+const TYPED_ID_DECISION = /^(approve|reject|accept|decline)\s+([0-9a-f][0-9a-f-]{5,35})$/i;
 
 /** The message is nothing but a yes, give or take "please". */
 const APPROVE_ONLY =
@@ -87,6 +96,14 @@ export function parseDecision(
   }
   const trimmed = text.trim();
   if (!trimmed) return null;
+  // A decision naming one proposal is never a decision about another.
+  const typed = TYPED_ID_DECISION.exec(trimmed);
+  if (typed) {
+    return {
+      action: /^(?:approve|accept)$/i.test(typed[1]) ? "approve" : "reject",
+      idPrefix: typed[2].toLowerCase(),
+    };
+  }
   // The whole message must be the decision. A prefix match would read
   // "cancel my meeting" as a rejection of whatever is pending.
   if (APPROVE_ONLY.test(trimmed)) return { action: "approve" };
@@ -374,6 +391,24 @@ export async function handleDecision(
       );
       return message("That button belongs to a different conversation. Nothing was changed.");
     }
+  } else if (parsed.idPrefix) {
+    // A typed id must identify exactly one of this user's waiting changes, so
+    // approving one proposal can never accidentally approve another.
+    const pending = await listPendingProposals(deps.db, input.userId, now);
+    const matches = pending.filter((p) =>
+      p.id.toLowerCase().startsWith(parsed.idPrefix!),
+    );
+    if (matches.length === 0) {
+      return message(
+        "I couldn't find a waiting change with that id. Nothing was changed.",
+      );
+    }
+    if (matches.length > 1) {
+      return message(
+        "That id matches more than one waiting change — send a few more characters of it. Nothing was changed.",
+      );
+    }
+    proposal = matches[0];
   } else {
     const pending = await listPendingProposals(deps.db, input.userId, now);
     if (pending.length === 0) return null;

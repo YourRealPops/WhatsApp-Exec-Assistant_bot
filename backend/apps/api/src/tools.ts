@@ -4,6 +4,7 @@ import {
   getCalendarAccount,
   listUpcomingEvents,
   listUpcomingReminders,
+  replaceEventReferences,
   setUserProfile,
   upsertEvents,
   type Db,
@@ -44,6 +45,7 @@ import {
   manageConnections,
 } from "./connections.js";
 import { proposeEventCancellation, proposeEventChange } from "./proposals.js";
+import { clock, day, offsetLabel } from "./when.js";
 
 export interface ToolContext {
   db: Db;
@@ -184,16 +186,55 @@ export function buildTools(ctx: ToolContext): Record<string, ToolHandler> {
       const from = startOfDayInTz(dateStr, tz);
       const to = startOfDayInTz(addDaysToDateStr(dateStr, days), tz);
       const events = await listUpcomingEvents(db, userId, from, to);
+
+      // This listing is now the conversational context: "the second one" and
+      // "the 9 PM one" resolve against exactly these rows.
+      await replaceEventReferences(
+        db,
+        userId,
+        events.map((e) => ({
+          externalId: e.external_id,
+          title: e.title,
+          start: new Date(e.start_at),
+          end: new Date(e.end_at),
+        })),
+      ).catch((err) => {
+        console.error(
+          `[list_events] could not store listing context for ${userId}:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
+
       return {
         date: dateStr,
-        events: events.map((e) => ({
-          id: e.external_id,
-          title: e.title,
-          start: new Date(e.start_at).toISOString(),
-          end: new Date(e.end_at).toISOString(),
-          allDay: e.all_day,
-          location: e.location,
-        })),
+        timezone: tz,
+        events: events.map((e) => {
+          const start = new Date(e.start_at);
+          const end = new Date(e.end_at);
+          // The same instant, already rendered in the user's timezone. The
+          // model quotes this text; it never converts an offset itself.
+          const startLocal = e.all_day
+            ? `${day(start, tz)} (all day)`
+            : `${day(start, tz)}, ${clock(start, tz)}`;
+          const endLocal = e.all_day
+            ? `all day`
+            : `${clock(end, tz)}`;
+          return {
+            id: e.external_id,
+            title: e.title,
+            start: start.toISOString(),
+            end: end.toISOString(),
+            startLocal,
+            endLocal,
+            display: e.all_day
+              ? `${day(start, tz)} (all day)`
+              : `${day(start, tz)}, ${clock(start, tz)}–${clock(end, tz)} (${offsetLabel(start, tz)})`,
+            timezone: tz,
+            offset: offsetLabel(start, tz),
+            allDay: e.all_day,
+            location: e.location,
+          };
+        }),
       };
     },
 

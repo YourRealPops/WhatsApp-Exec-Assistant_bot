@@ -25,6 +25,18 @@ import type { GoogleConfig } from "./calendar-access.js";
 import { handleDecision } from "./decisions.js";
 
 /**
+ * The Approve/Reject buttons for exactly one proposal. The payload is the
+ * proposal's own id, never a position: a tap can only ever decide the request
+ * whose buttons were sent, even when several proposals are pending.
+ */
+export function proposalButtons(proposalId: string): Button[] {
+  return [
+    { id: `appr:${proposalId}`, title: "Approve" },
+    { id: `rej:${proposalId}`, title: "Reject" },
+  ];
+}
+
+/**
  * The first thing a brand-new user ever hears from ECOS. It is fixed copy on
  * purpose: it introduces the assistant and asks for name + designation, so the
  * opening turn is a handshake rather than an answer to whatever they happened
@@ -215,23 +227,43 @@ export async function handleUserText(
       ),
   }, opts.text);
 
-  // A created proposal is always delivered verbatim, with the buttons that
+  // Every created proposal is delivered verbatim, with the buttons that
   // decide it: the exact change the user approves is the exact change stored.
-  const proposal = result.toolCalls.find(
-    (call) =>
-      call.ok &&
-      (call.name === "propose_event_change" ||
-        call.name === "propose_event_cancellation"),
-  )?.result as { proposalId?: string; message?: string } | undefined;
+  // A compound request can produce several, and each keeps its own id.
+  const proposals = result.toolCalls.flatMap((call) => {
+    if (
+      !call.ok ||
+      (call.name !== "propose_event_change" &&
+        call.name !== "propose_event_cancellation")
+    ) {
+      return [];
+    }
+    const payload = call.result as {
+      proposalId?: string;
+      message?: string;
+    } | null;
+    if (!payload?.proposalId || !payload.message) return [];
+    return [{ proposalId: payload.proposalId, message: payload.message }];
+  });
   let reply = result.reply;
   let buttons: Button[] | undefined;
   let saved: boolean;
-  if (proposal?.proposalId && proposal.message) {
-    reply = proposal.message;
-    buttons = [
-      { id: `appr:${proposal.proposalId}`, title: "Approve" },
-      { id: `rej:${proposal.proposalId}`, title: "Reject" },
-    ];
+  if (proposals.length === 1) {
+    buttons = proposalButtons(proposals[0].proposalId);
+    // With a failure alongside it, the combined reply says what happened to
+    // both actions; the proposal text is already part of it.
+    if (result.toolCalls.every((call) => call.ok)) {
+      reply = proposals[0].message;
+    }
+  } else if (proposals.length > 1) {
+    // Keep the combined reply when an action failed alongside the proposals:
+    // it already reports that failure, and dropping it would be a silent lie
+    // about part of the request.
+    if (result.toolCalls.every((call) => call.ok)) {
+      reply = proposals
+        .map((proposal, index) => `${index + 1}) ${proposal.message}`)
+        .join("\n\n");
+    }
   }
 
   // A reply built by the model may embed a raw calendar link (the
@@ -250,7 +282,26 @@ export async function handleUserText(
   }
 
   console.log(`[pipeline] → ${opts.phone} (${result.mode}): ${safeReply}`);
-  if (buttons) {
+  if (proposals.length > 1) {
+    // One message per proposal, each with its own Approve/Reject pair: the ids
+    // are distinct, so deciding one can never decide another.
+    for (const proposal of proposals) {
+      try {
+        await deps.sender.sendButtons(
+          opts.phone,
+          proposal.message,
+          proposalButtons(proposal.proposalId),
+        );
+      } catch (err) {
+        console.error(`[pipeline] button send to ${opts.phone} failed:`, err);
+        await safeSend(
+          deps,
+          opts.phone,
+          `${proposal.message}\n\nReply "approve ${proposal.proposalId.slice(0, 8)}" or "reject ${proposal.proposalId.slice(0, 8)}".`,
+        );
+      }
+    }
+  } else if (buttons) {
     try {
       // The link the user taps must reach the client unchanged, so the
       // connect/oauth/connections URL is transmitted raw and only the

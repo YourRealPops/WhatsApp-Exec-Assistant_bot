@@ -466,6 +466,82 @@ export async function reconcileMissingEvents(
   return { cancelled: row.cancelled, remindersRemoved: row.reminders_removed };
 }
 
+/**
+ * One event from the last calendar listing the user was shown. `position` is
+ * the 1-based order of that listing, which is what "the second one" means.
+ */
+export interface EventReference {
+  id: string;
+  user_id: string;
+  position: number;
+  external_id: string;
+  title: string;
+  start_at: Date;
+  end_at: Date;
+  listed_at: Date;
+  /** When a proposal last pointed at this event; null until then. */
+  focused_at: Date | null;
+}
+
+/**
+ * Replace the user's listing context in one transaction. Each successful
+ * listing is the whole truth: keeping older rows around would let "the first
+ * one" refer to an event the user is no longer looking at.
+ */
+export async function replaceEventReferences(
+  db: Db,
+  userId: string,
+  events: Array<{
+    externalId: string;
+    title: string;
+    start: Date;
+    end: Date;
+  }>,
+): Promise<void> {
+  await db.begin(async (tx) => {
+    await tx`delete from event_references where user_id = ${userId}`;
+    let position = 0;
+    for (const event of events) {
+      position += 1;
+      await tx`
+        insert into event_references
+          (user_id, position, external_id, title, start_at, end_at)
+        values
+          (${userId}, ${position}, ${event.externalId}, ${event.title},
+           ${event.start}, ${event.end})`;
+    }
+  });
+}
+
+/**
+ * The events from the last listing, unless that listing is stale. A stale
+ * context is never used to select an event silently.
+ */
+export async function listEventReferences(
+  db: Db,
+  userId: string,
+  maxAgeMinutes = 720,
+): Promise<EventReference[]> {
+  const rows = await db`
+    select * from event_references
+    where user_id = ${userId}
+      and listed_at >= now() - make_interval(mins => ${maxAgeMinutes})
+    order by position`;
+  return rows as unknown as EventReference[];
+}
+
+/** Record which referenced event a proposal resolved, for a later "it". */
+export async function focusEventReference(
+  db: Db,
+  userId: string,
+  externalId: string,
+): Promise<void> {
+  await db`
+    update event_references
+    set focused_at = now()
+    where user_id = ${userId} and external_id = ${externalId}`;
+}
+
 // ---------------------------------------------------------------------------
 // Proposals (propose → approve → execute → verify)
 // ---------------------------------------------------------------------------

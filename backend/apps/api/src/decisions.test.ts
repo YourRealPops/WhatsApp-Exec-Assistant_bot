@@ -588,6 +588,100 @@ test("an approved cancellation deletes the event and verifies it is gone", async
   assert.equal((await getProposal(db as unknown as Db, proposal.id))!.status, "succeeded");
 });
 
+test("approving one of two pending proposals leaves the other pending", async (t) => {
+  const { db, calendarAccounts } = makeFakeDb();
+  connectGoogle(calendarAccounts, UID);
+  const realFetch = globalThis.fetch;
+  const google = makeGoogleStub();
+  google.getResult(200, MOVED_EVENT);
+  (globalThis.fetch as ReturnType<typeof makeGoogleStub>["fetch"]) = google.fetch as any;
+  t.after(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const movePayload = {
+    action: "reschedule" as const,
+    eventId: "evt-1",
+    calendarId: "primary",
+    title: "Board review",
+    before: { start: "2026-10-25T09:00:00+01:00", end: "2026-10-25T10:00:00+01:00" },
+    after: { start: "2026-10-26T09:00:00+01:00", end: "2026-10-26T10:00:00+01:00" },
+    etag: null,
+    timezone: "Europe/London",
+    attendees: 0,
+    sendUpdates: "all" as const,
+  };
+  const cancelPayload = { ...CANCEL_PAYLOAD, eventId: "evt-2" };
+  const move = await createProposal(db, {
+    userId: UID,
+    kind: "reschedule",
+    payload: movePayload,
+    payloadHash: hashPayload(movePayload),
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+  });
+  const cancel = await createProposal(db, {
+    userId: UID,
+    kind: "cancellation",
+    payload: cancelPayload,
+    payloadHash: hashPayload(cancelPayload),
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+  });
+
+  const result = await handleDecision(
+    { db: db as unknown as Db, google: GOOGLE, now: () => new Date() },
+    { userId: UID, text: "ok", replyId: `appr:${move.id}` },
+  );
+  assert.ok(result);
+  assert.match(result.reply, /Done/i);
+  assert.equal((await getProposal(db as unknown as Db, move.id))!.status, "succeeded");
+  assert.equal((await getProposal(db as unknown as Db, cancel.id))!.status, "pending");
+
+  // A typed id approves exactly that one and nothing else.
+  const typed = await handleDecision(
+    { db: db as unknown as Db, google: GOOGLE, now: () => new Date() },
+    { userId: UID, text: `reject ${cancel.id.slice(0, 8)}`, replyId: null },
+  );
+  assert.ok(typed);
+  assert.equal((await getProposal(db as unknown as Db, cancel.id))!.status, "rejected");
+});
+
+test("a typed id prefix matching two proposals is refused", async () => {
+  const { db, proposals } = makeFakeDb();
+  const payload = {
+    eventId: "evt-1",
+    calendarId: "primary",
+    title: "Board review",
+    before: { start: "2026-10-25T09:00:00+01:00", end: "2026-10-25T10:00:00+01:00" },
+    after: { start: "2026-10-26T09:00:00+01:00", end: "2026-10-26T10:00:00+01:00" },
+    etag: null,
+    timezone: "Europe/London",
+    attendees: 0,
+    sendUpdates: "all" as const,
+  };
+  const first = await createProposal(db, {
+    userId: UID,
+    payload,
+    payloadHash: hashPayload(payload),
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+  });
+  await createProposal(db, {
+    userId: UID,
+    payload,
+    payloadHash: hashPayload(payload),
+    expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+  });
+  // Force a shared prefix so the typed id cannot identify exactly one row.
+  proposals[1].id = `${first.id.slice(0, 8)}${proposals[1].id.slice(8)}`;
+  const prefix = first.id.slice(0, 8);
+  const result = await handleDecision(
+    { db: db as unknown as Db, google: null as any, now: () => new Date() },
+    { userId: UID, text: `approve ${prefix}`, replyId: null },
+  );
+  assert.ok(result);
+  assert.match(result.reply, /more than one|different conversation|Nothing was changed/i);
+  assert.equal((await getProposal(db as unknown as Db, first.id))!.status, "pending");
+});
+
 test("a cancellation Google did not apply is never reported as done", async (t) => {
   const { db, calendarAccounts } = makeFakeDb();
   connectGoogle(calendarAccounts, UID);
