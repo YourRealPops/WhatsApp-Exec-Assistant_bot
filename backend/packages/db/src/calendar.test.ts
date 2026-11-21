@@ -13,7 +13,10 @@ import {
   listAccountsDueSync,
   listReminders,
   listUpcomingEvents,
+  claimAccountForSync,
   markReauthRequired,
+  markSynced,
+  recordSyncFailure,
   materializeAllReminders,
   materializeReminders,
   reconcileMissingEvents,
@@ -131,6 +134,74 @@ test("flagged accounts are skipped by the sync scheduler until they reconnect", 
   });
   const resumed = await listAccountsDueSync(d, 0);
   assert.ok(resumed.some((a) => a.id === account.id), "reconnecting resumes syncing");
+});
+
+test("sync locking, cursors and backoff preserve the last successful timestamp", { skip }, async () => {
+  const d = getDb();
+  const user = await makeUser();
+  const account = await upsertCalendarAccount(d, {
+    userId: user.id,
+    provider: "google",
+    accessToken: "access-1",
+    refreshToken: "refresh-1",
+  });
+
+  assert.equal(await claimAccountForSync(d, account.id), true);
+  assert.equal(
+    await claimAccountForSync(d, account.id),
+    false,
+    "a second worker cannot own the same account",
+  );
+
+  // A failed fetch must not move synced_at: stale events stay visibly stale.
+  const beforeFailure = await getCalendarAccount(d, user.id);
+  assert.equal(beforeFailure?.synced_at, null);
+  await recordSyncFailure(d, account.id, "Google 503", 2, future(5));
+  const failed = await getCalendarAccount(d, user.id);
+  assert.equal(failed?.synced_at, null, "failure did not advance the sync time");
+  assert.equal(failed?.last_sync_error, "Google 503");
+  assert.equal(failed?.sync_attempts, 2);
+  assert.ok(failed?.next_sync_at, "a retry is scheduled");
+  assert.equal(failed?.sync_lock_at, null, "the lock is released after failure");
+
+  // Success records the cursor and schedule.
+  await markSynced(d, account.id, {
+    nextSyncAt: future(5),
+    syncToken: "cursor-1",
+    attempts: 0,
+  });
+  const synced = await getCalendarAccount(d, user.id);
+  assert.ok(synced?.synced_at, "success advances synced_at");
+  assert.equal(synced?.last_sync_error, null);
+  assert.equal(synced?.sync_token, "cursor-1");
+  assert.equal(synced?.sync_attempts, 0);
+  assert.equal(synced?.sync_lock_at, null);
+
+  // Omitting syncToken keeps it; an explicit null clears an expired cursor.
+  await markSynced(d, account.id, { nextSyncAt: future(5) });
+  assert.equal((await getCalendarAccount(d, user.id))?.sync_token, "cursor-1");
+  await markSynced(d, account.id, { nextSyncAt: future(5), syncToken: null });
+  assert.equal((await getCalendarAccount(d, user.id))?.sync_token, null);
+});
+
+test("two database pools cannot claim the same sync lock", { skip }, async () => {
+  const d = getDb();
+  const user = await makeUser();
+  const account = await upsertCalendarAccount(d, {
+    userId: user.id,
+    provider: "google",
+    accessToken: "access-1",
+  });
+  const other = createDb(url!, { max: 1 });
+  try {
+    const results = await Promise.all([
+      claimAccountForSync(d, account.id),
+      claimAccountForSync(other, account.id),
+    ]);
+    assert.equal(results.filter(Boolean).length, 1, "exactly one claim wins");
+  } finally {
+    await other.end();
+  }
 });
 
 test("all-day events get no reminder ladder", { skip }, async () => {

@@ -238,6 +238,63 @@ test("the prompt addresses a known user by name, never anyone else", () => {
   assert.match(prompt, /call save_profile/);
 });
 
+test("a general report routes to generate_document with a topic, not a calendar", async () => {
+  let seen: Record<string, unknown> = {};
+  const res = await runAgent(
+    makeDeps({
+      userMessage: "Create a PDF report about artificial intelligence",
+      tools: {
+        generate_document: async (args) => {
+          seen = args;
+          return { message: "Your PDF is being prepared." };
+        },
+      },
+    }),
+  );
+  assert.equal(res.toolCalls[0]?.name, "generate_document");
+  assert.equal(seen.format, "pdf");
+  assert.equal(seen.source, "general");
+  assert.equal(seen.topic, "artificial intelligence");
+  assert.equal(seen.date, undefined, "general documents do not need a date range");
+  assert.equal(res.reply, "Your PDF is being prepared.");
+});
+
+test("a requested slide count and business proposal stay general", async () => {
+  let seen: Record<string, unknown> = {};
+  await runAgent(
+    makeDeps({
+      userMessage: "Create a PowerPoint presentation about cybersecurity with 10 slides",
+      tools: {
+        generate_document: async (args) => {
+          seen = args;
+          return { message: "queued" };
+        },
+      },
+    }),
+  );
+  assert.equal(seen.source, "general");
+  assert.equal(seen.topic, "cybersecurity");
+  assert.equal(seen.slide_count, 10);
+});
+
+test("a summary of tomorrow's meetings stays on the calendar path", async () => {
+  let seen: Record<string, unknown> = {};
+  await runAgent(
+    makeDeps({
+      userMessage: "Create a PDF summary of my meetings tomorrow",
+      tools: {
+        generate_document: async (args) => {
+          seen = args;
+          return { message: "queued" };
+        },
+      },
+    }),
+  );
+  assert.equal(seen.source, "calendar");
+  assert.equal(seen.days, 1);
+  assert.ok(seen.date);
+});
+
 test("the prompt asks an unknown user for a name exactly once", () => {
   const prompt = buildSystemPrompt({ timezone: TZ, now: new Date() });
   assert.match(prompt, /do not know the user's name/i);

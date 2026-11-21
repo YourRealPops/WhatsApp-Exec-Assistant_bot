@@ -218,6 +218,68 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: "function",
     function: {
+      name: "generate_document",
+      description:
+        "Create a PDF, DOCX or PPTX document. Use source=calendar for summaries of the user's schedule, with a date range; the calendar is refreshed and snapshotted first. Use source=general for reports, proposals, briefings, guides or decks on any topic — no calendar connection is needed. Generation runs in the background: acknowledge the request in one line and never claim the file has been delivered until it arrives.",
+      parameters: {
+        type: "object",
+        properties: {
+          format: {
+            type: "string",
+            enum: ["pdf", "docx", "pptx"],
+            description: "File format requested: pdf, docx (Word) or pptx (PowerPoint).",
+          },
+          source: {
+            type: "string",
+            enum: ["calendar", "general"],
+            description:
+              "calendar when the content is the user's own schedule/meetings; general for a document about any other subject.",
+          },
+          topic: {
+            type: "string",
+            description:
+              "For general documents: the subject, e.g. \"artificial intelligence\" or \"a business proposal for a coffee shop\".",
+          },
+          title: {
+            type: "string",
+            description: "Document title, e.g. \"Artificial intelligence: a practical report\".",
+          },
+          audience: {
+            type: "string",
+            description: "Optional intended audience for a general document.",
+          },
+          tone: {
+            type: "string",
+            description: "Optional tone, e.g. formal, concise or persuasive.",
+          },
+          structure: {
+            type: "string",
+            description:
+              "Optional outline for a general document, with one section heading per line. Use it when the user specifies the sections or order.",
+          },
+          slide_count: {
+            type: "number",
+            description:
+              "For PowerPoint only: total slides requested, including the cover (1-60).",
+          },
+          date: {
+            type: "string",
+            description:
+              "Calendar documents only: first day of the range in YYYY-MM-DD (user's local time). Defaults to today.",
+          },
+          days: {
+            type: "number",
+            description:
+              "Calendar documents only: how many days the document covers. Default 7, max 31 (use 1 for a single day).",
+          },
+        },
+        required: ["format"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "save_profile",
       description:
         "Save or edit the user's name and designation on their profile. Call it when they tell you their name or role, or ask to be called something else. Pass only what changed — an omitted field keeps its stored value.",
@@ -274,16 +336,44 @@ export interface EventSlot {
   location?: string | null;
 }
 
+export interface CalendarFreshnessInfo {
+  /** A Google fetch ran during this read. */
+  refreshed: boolean;
+  /** The local copy is older than the freshness threshold and refresh failed. */
+  stale: boolean;
+  /** When the data was last successfully synced from Google. */
+  lastSyncedAt: string | null;
+  /** Plain-words warning to relay when stale; null when the data is current. */
+  warning: string | null;
+}
+
 export interface ListEventsResult {
   date: string;
   /** IANA zone every local/display field in this result is rendered in. */
   timezone?: string;
   events: EventSlot[];
+  /** Say this out loud when `stale` — never present old events as current. */
+  freshness?: CalendarFreshnessInfo;
 }
 
 export interface FindFreeTimeResult {
   date: string;
   slots: Array<{ start: string; end: string }>;
+  /** Present when the calendar could not be refreshed; relay it. */
+  warning?: string;
+}
+
+export interface GenerateDocumentResult {
+  jobId: string;
+  format: "pdf" | "docx" | "pptx";
+  /** Whether this is a calendar snapshot or a general writing brief. */
+  source: "calendar" | "general";
+  title: string;
+  eventCount: number;
+  /** Present when the user requested a specific PowerPoint slide count. */
+  slideCount?: number;
+  /** Acknowledgement text to send as-is. */
+  message: string;
 }
 
 export interface CreateEventResult {

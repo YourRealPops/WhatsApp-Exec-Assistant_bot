@@ -1,5 +1,7 @@
 import {
   cancelEventReminders,
+  cancelEventsByExternalIds,
+  claimAccountForSync,
   listAccountsDueSync,
   listUpcomingEvents,
   listUsersWithoutCalendar,
@@ -7,6 +9,7 @@ import {
   markSynced,
   materializeAllReminders,
   reconcileMissingEvents,
+  recordSyncFailure,
   updateAccountTokens,
   upsertEvents,
   type CalendarAccount,
@@ -16,11 +19,14 @@ import {
   CalendarAuthError,
   buildConnectUrl,
   createGoogleClient,
+  decryptToken,
   defaultDevEvents,
+  encryptToken,
+  isEncrypted,
   reconnectNotice,
-  type CalendarClient,
 } from "@exec-assistant/calendar";
 import type { Sender } from "@exec-assistant/whatsapp";
+import type { LlmConfig } from "@exec-assistant/ai";
 import type { Alarm } from "./alarm.js";
 
 export interface WorkerConfig {
@@ -35,35 +41,87 @@ export interface WorkerConfig {
   maxSendAttempts: number;
   batchSize: number;
   devCalendar: boolean;
-  google: { clientId?: string; clientSecret?: string };
+  google: {
+    clientId?: string;
+    clientSecret?: string;
+    /** AES-256-GCM key for stored OAuth tokens; null when legacy plaintext. */
+    tokenKey?: Buffer | null;
+  };
+  /** Consecutive failed syncs before a longer (capped) wait. */
+  maxSyncAttempts?: number;
+  /** Authoring model for general-purpose documents; null = deterministic draft. */
+  llm?: LlmConfig | null;
+  /** Asynchronous document generation and its retention policy. */
+  document: {
+    concurrency: number;
+    pollMs: number;
+    retentionDays: number;
+    maxBytes: number;
+    maxEvents: number;
+    tmpDir?: string;
+  };
   template: { name?: string; language: string };
   /** Needed to mint reconnect links; without them the nudge is skipped. */
   publicBaseUrl?: string;
   oauthStateSecret?: string;
 }
 
+type GoogleClient = ReturnType<typeof createGoogleClient>;
+
+/**
+ * Decrypt one stored token for Google. A v1: ciphertext without the key is a
+ * configuration error, not an auth failure: syncing with ciphertext would
+ * make Google reject the account and ask the user to reconnect for no reason.
+ */
+function plainToken(value: string, cfg: WorkerConfig): string {
+  if (!isEncrypted(value)) return value;
+  if (!cfg.google.tokenKey) {
+    throw new Error(
+      "calendar tokens are encrypted but TOKEN_ENCRYPTION_KEY is not set on the worker",
+    );
+  }
+  return decryptToken(value, cfg.google.tokenKey);
+}
+
 function buildGoogleClient(
   cfg: WorkerConfig,
   account: CalendarAccount,
-): CalendarClient | null {
+): GoogleClient | null {
   if (!cfg.google.clientId || !cfg.google.clientSecret) return null;
   return createGoogleClient({
     clientId: cfg.google.clientId,
     clientSecret: cfg.google.clientSecret,
     tokens: {
-      accessToken: account.access_token,
-      refreshToken: account.refresh_token,
+      accessToken: plainToken(account.access_token, cfg),
+      refreshToken: account.refresh_token
+        ? plainToken(account.refresh_token, cfg)
+        : null,
       expiresAt: account.expires_at,
     },
     calendarId: account.calendar_id,
     timezone: account.timezone ?? "UTC",
     onTokenRefresh: async (tokens) => {
       await updateAccountTokens(cfg.db, account.id, {
-        accessToken: tokens.accessToken,
+        accessToken: cfg.google.tokenKey
+          ? encryptToken(tokens.accessToken, cfg.google.tokenKey)
+          : tokens.accessToken,
         expiresAt: tokens.expiresAt ?? null,
       });
     },
   });
+}
+
+/**
+ * How long to wait after a failed sync. Starts at 30s and doubles per failure,
+ * capped at the normal sync interval (and at 30 minutes) so a broken account
+ * neither hot-loops nor waits indefinitely.
+ */
+export function syncRetryDelayMs(
+  attempts: number,
+  intervalMs: number,
+): number {
+  const grown = 30_000 * 2 ** Math.min(Math.max(attempts, 0), 6);
+  return Math.max(5_000, Math.min(grown, intervalMs, 30 * 60_000));
 }
 
 /**
@@ -111,54 +169,110 @@ export async function syncCalendars(cfg: WorkerConfig): Promise<number> {
   const now = Date.now();
   const from = new Date(now - 24 * 3_600_000);
   const to = new Date(now + cfg.lookaheadDays * 86_400_000);
+  const nextSuccess = new Date(now + cfg.syncIntervalMs);
   let saved_count = 0;
 
   for (const account of accounts) {
     const label = account.user_id.slice(0, 8);
+    // Two workers (or two ticks) can never fetch the same account at once.
+    if (!(await claimAccountForSync(cfg.db, account.id).catch(() => false))) {
+      continue;
+    }
     try {
       const client = buildGoogleClient(cfg, account);
       if (!client) {
-        console.warn(`[worker] GOOGLE_* not configured — skipping sync for user ${label}`);
-        await markSynced(cfg.db, account.id);
+        // Never mark a skipped sync as successful: synced_at is the promise
+        // that the local events are current, and they are not.
+        const message = "Google credentials are not configured on the worker";
+        const attempts = Math.min(
+          (account.sync_attempts ?? 0) + 1,
+          cfg.maxSyncAttempts ?? 3,
+        );
+        const retryAt = new Date(now + syncRetryDelayMs(attempts - 1, cfg.syncIntervalMs));
+        await recordSyncFailure(cfg.db, account.id, message, attempts, retryAt);
+        console.warn(`[worker] sync skipped for user ${label}: ${message}`);
         continue;
       }
-      const events = await client.listEvents(from, to);
-      const saved = await upsertEvents(cfg.db, account.user_id, events);
+
+      // An existing cursor makes this an incremental fetch; a full fetch is
+      // the authoritative window used to reconcile events deleted elsewhere.
+      const result = await client.syncWindow({
+        from,
+        to,
+        syncToken: account.sync_token,
+      });
+      const saved = await upsertEvents(cfg.db, account.user_id, result.events);
       const cancelled = saved.filter((e) => e.status === "cancelled").map((e) => e.id);
       if (cancelled.length > 0) {
         await cancelEventReminders(cfg.db, cancelled);
       }
-      // The list is complete (listEvents follows every page), so anything
-      // Google did not return is gone: cancel it by absence.
-      const reconciled = await reconcileMissingEvents(cfg.db, account.user_id, {
-        from,
-        to,
-        seenExternalIds: events.map((e) => e.externalId),
+      const deleted = await cancelEventsByExternalIds(
+        cfg.db,
+        account.user_id,
+        result.deletedExternalIds,
+      );
+      // Absence is only evidence on a complete full fetch: an incremental
+      // response lists changes, not the whole calendar.
+      const reconciled = result.full
+        ? await reconcileMissingEvents(cfg.db, account.user_id, {
+            from,
+            to,
+            seenExternalIds: result.events.map((e) => e.externalId),
+          })
+        : { cancelled: 0, remindersRemoved: 0 };
+
+      await markSynced(cfg.db, account.id, {
+        nextSyncAt: nextSuccess,
+        // A full fetch is authoritative: replace (or clear) the cursor. An
+        // incremental response keeps the previous one if Google omits it.
+        syncToken: result.full
+          ? result.nextSyncToken
+          : (result.nextSyncToken ?? account.sync_token),
+        attempts: 0,
       });
-      await markSynced(cfg.db, account.id);
       saved_count += saved.length;
       console.log(
-        `[worker] synced ${saved.length} events for user ${label}` +
+        `[worker] ${result.full ? "full" : "incremental"} sync: ${saved.length} events for user ${label}` +
           (cancelled.length ? ` (${cancelled.length} cancelled)` : "") +
+          (deleted.cancelled
+            ? ` (${deleted.cancelled} deleted on Google, ${deleted.remindersRemoved} reminders dropped)`
+            : "") +
           (reconciled.cancelled
             ? ` (${reconciled.cancelled} no longer on Google, ${reconciled.remindersRemoved} reminders dropped)`
             : ""),
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      const attempts = Math.min(
+        (account.sync_attempts ?? 0) + 1,
+        cfg.maxSyncAttempts ?? 3,
+      );
+      const retryAt = new Date(now + syncRetryDelayMs(attempts - 1, cfg.syncIntervalMs));
+
       if (err instanceof CalendarAuthError) {
-        // Pause the account and ask the user to reconnect. Only the first
-        // transition messages them, so a dead token can't spam every tick.
+        // A dead grant is not a transient failure: pause the account and ask
+        // the user to reconnect. Only the first transition messages them.
+        await recordSyncFailure(cfg.db, account.id, message, attempts, retryAt).catch(
+          () => {},
+        );
         const first = await markReauthRequired(cfg.db, account.id).catch(() => false);
         console.warn(
           `[worker] Google grant rejected for user ${label} (${err.code}): ${message} — syncing paused`,
         );
         if (first) await notifyReauth(cfg, account);
       } else {
-        console.error(`[worker] sync failed for user ${label}:`, message);
+        // synced_at stays at its last successful value: the local events are
+        // still the old ones and must not be reported as freshly synced.
+        await recordSyncFailure(cfg.db, account.id, message, attempts, retryAt).catch(
+          () => {},
+        );
+        console.error(
+          `[worker] sync failed for user ${label} (attempt ${attempts}, retry in ${Math.round(
+            (retryAt.getTime() - now) / 1000,
+          )}s):`,
+          message,
+        );
       }
-      // Mark synced anyway so one broken account can't hot-loop every tick.
-      await markSynced(cfg.db, account.id).catch(() => {});
     }
   }
   return saved_count;

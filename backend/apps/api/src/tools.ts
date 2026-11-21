@@ -25,6 +25,7 @@ import type {
   DisconnectResult,
   ProposeEventCancellationResult,
   FindFreeTimeResult,
+  GenerateDocumentResult,
   ListEventsResult,
   ListRemindersResult,
   ManageConnectionsResult,
@@ -45,6 +46,8 @@ import {
   manageConnections,
 } from "./connections.js";
 import { proposeEventCancellation, proposeEventChange } from "./proposals.js";
+import { ensureFreshCalendar } from "./calendar-freshness.js";
+import { requestCalendarDocument } from "./documents.js";
 import { clock, day, offsetLabel } from "./when.js";
 
 export interface ToolContext {
@@ -61,9 +64,17 @@ export interface ToolContext {
   approvalTtlMinutes?: number;
   /** The user's message for this turn — the disconnect confirmation reads it. */
   currentMessage?: string;
+  /** Meta's id for this turn's inbound message — the document job idempotency key. */
+  currentMessageId?: string;
   /** True when calendar writes are off; events created here are local-only
    *  until Google is connected. */
   needsConnect: boolean;
+  /** On-demand freshness threshold for calendar reads. */
+  freshnessMs?: number;
+  lookaheadDays?: number;
+  reminderOffsets?: number[];
+  maxOffsetMinutes?: number;
+  document?: { maxEvents: number; maxDays: number };
 }
 
 /** One Google Calendar API error, plus a small set of conditionally-backed
@@ -177,6 +188,19 @@ export async function ensureDevEvents(
 
 export function buildTools(ctx: ToolContext): Record<string, ToolHandler> {
   const { db, userId, timezone: tz, needsConnect } = ctx;
+  const reminderOffsets = ctx.reminderOffsets ?? [15, 10, 5, 0];
+
+  async function freshness() {
+    return ensureFreshCalendar({
+      db,
+      userId,
+      google: ctx.google ?? null,
+      freshnessMs: ctx.freshnessMs ?? 0,
+      lookaheadDays: ctx.lookaheadDays ?? 14,
+      reminderOffsets,
+      maxOffsetMinutes: ctx.maxOffsetMinutes ?? Math.max(...reminderOffsets),
+    });
+  }
 
   return {
     list_events: async (args): Promise<ListEventsResult> => {
@@ -185,6 +209,9 @@ export function buildTools(ctx: ToolContext): Record<string, ToolHandler> {
       const days = clamp(Number(args.days ?? 1), 1, MAX_DAYS);
       const from = startOfDayInTz(dateStr, tz);
       const to = startOfDayInTz(addDaysToDateStr(dateStr, days), tz);
+      // Refresh first when the local copy is old: an event edited in Google
+      // seconds ago must be visible in this answer.
+      const state = await freshness();
       const events = await listUpcomingEvents(db, userId, from, to);
 
       // This listing is now the conversational context: "the second one" and
@@ -208,6 +235,7 @@ export function buildTools(ctx: ToolContext): Record<string, ToolHandler> {
       return {
         date: dateStr,
         timezone: tz,
+        freshness: state,
         events: events.map((e) => {
           const start = new Date(e.start_at);
           const end = new Date(e.end_at);
@@ -243,6 +271,7 @@ export function buildTools(ctx: ToolContext): Record<string, ToolHandler> {
       const duration = clamp(Number(args.duration_minutes ?? 60), 15, 480);
       const dayStart = startOfDayInTz(dateStr, tz);
       const dayEnd = startOfDayInTz(addDaysToDateStr(dateStr, 1), tz);
+      const state = await freshness();
       const events = await listUpcomingEvents(db, userId, dayStart, dayEnd);
 
       const workStart = parseWhen(`${dateStr}T${WORKDAY_START}`, tz);
@@ -276,8 +305,31 @@ export function buildTools(ctx: ToolContext): Record<string, ToolHandler> {
       }
       offer(cursor, workEnd.getTime());
 
-      return { date: dateStr, slots };
+      return {
+        date: dateStr,
+        slots,
+        ...(state.stale && state.warning ? { warning: state.warning } : {}),
+      };
     },
+
+    generate_document: async (args): Promise<GenerateDocumentResult> =>
+      requestCalendarDocument(
+        {
+          db,
+          userId,
+          timezone: tz,
+          google: ctx.google ?? null,
+          freshnessMs: ctx.freshnessMs ?? 0,
+          lookaheadDays: ctx.lookaheadDays ?? 14,
+          reminderOffsets,
+          maxOffsetMinutes: ctx.maxOffsetMinutes ?? Math.max(...reminderOffsets),
+          maxEvents: ctx.document?.maxEvents ?? 500,
+          maxDays: ctx.document?.maxDays ?? 31,
+          currentMessageId: ctx.currentMessageId,
+          currentMessage: ctx.currentMessage,
+        },
+        args,
+      ),
 
    
 create_event: async (args): Promise<CreateEventResult> => {

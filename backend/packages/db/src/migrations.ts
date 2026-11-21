@@ -184,11 +184,62 @@ const MIGRATIONS: string[] = [
   create index if not exists event_references_user_idx
     on event_references (user_id, position);
   `,
+  `
+  -- Freshness-aware calendar sync. next_sync_at is when this account is next
+  -- due (successful sync = now + interval, failure = backoff). sync_lock_at
+  -- is claimed before a sync so two workers can never fetch the same account
+  -- at once. sync_token is Google's incremental sync token; null means the
+  -- next fetch is a full window sync.
+  alter table calendar_accounts
+    add column if not exists sync_token text,
+    add column if not exists next_sync_at timestamptz,
+    add column if not exists sync_lock_at timestamptz,
+    add column if not exists sync_attempts int not null default 0;
+
+  create index if not exists calendar_accounts_due_idx
+    on calendar_accounts (next_sync_at) where reauth_required_at is null;
+  `,
+  `
+  -- Asynchronous document generation. The payload is a snapshot of the
+  -- calendar data the request was answered with, so a job can never render
+  -- stale or fabricated events. request_message_id makes a webhook retry
+  -- idempotent; the unique index is the duplicate guard.
+  create table if not exists document_jobs (
+    id uuid primary key default gen_random_uuid(),
+    user_id uuid not null references users(id) on delete cascade,
+    request_message_id text not null unique,
+    kind text not null check (kind in ('pdf', 'docx', 'pptx')),
+    title text not null,
+    payload jsonb not null,
+    status text not null default 'queued'
+      check (status in ('queued', 'generating', 'uploading', 'sent', 'failed')),
+    attempts int not null default 0,
+    max_attempts int not null default 3,
+    next_attempt_at timestamptz,
+    error text,
+    wa_media_id text,
+    wa_message_id text,
+    created_at timestamptz not null default now(),
+    started_at timestamptz,
+    completed_at timestamptz,
+    updated_at timestamptz not null default now()
+  );
+  create index if not exists document_jobs_queue_idx
+    on document_jobs (next_attempt_at) where status = 'queued';
+  create index if not exists document_jobs_user_idx
+    on document_jobs (user_id, created_at desc);
+  `,
 ];
 
 export const MIGRATION_COUNT = MIGRATIONS.length;
 
-export async function runMigrations(db: Db): Promise<void> {
+export async function runMigrations(
+  db: Db,
+  opts: { upTo?: number } = {}
+): Promise<void> {
+  // `upTo` exists so integration tests can build the previous schema and then
+  // prove the upgrade path. Production always applies every migration.
+  const limit = Math.min(opts.upTo ?? MIGRATIONS.length, MIGRATIONS.length);
   await db.begin(async (tx) => {
     // Serialises concurrent migrators (API + worker booting together).
     await tx`select pg_advisory_xact_lock(727272)`;
@@ -199,7 +250,7 @@ export async function runMigrations(db: Db): Promise<void> {
       )`;
     const applied = await tx`select version from schema_migrations`;
     const done = new Set(applied.map((r) => Number(r.version)));
-    for (let i = 0; i < MIGRATIONS.length; i++) {
+    for (let i = 0; i < limit; i++) {
       const version = i + 1;
       if (done.has(version)) continue;
       await tx.unsafe(MIGRATIONS[i]);

@@ -336,6 +336,88 @@ test("a 429 on the calendar list is an ordinary error, not an auth failure", asy
   );
 });
 
+test("a full syncWindow returns Google's next sync token", async (t) => {
+  const calls = stubFetch(t, () => ({
+    status: 200,
+    body: { items: [timedEvent("one")], nextSyncToken: "cursor-1" },
+  }));
+  const result = await client({}).syncWindow({ from: FROM, to: TO });
+  assert.equal(result.full, true);
+  assert.equal(result.nextSyncToken, "cursor-1");
+  assert.deepEqual(result.events.map((e) => e.externalId), ["one"]);
+  assert.equal(new URL(calls[0]).searchParams.get("syncToken"), null);
+});
+
+test("an incremental sync sends syncToken/showDeleted and reports deletions", async (t) => {
+  const calls = stubFetch(t, () => ({
+    status: 200,
+    body: {
+      items: [
+        {
+          id: "gone-event",
+          status: "cancelled",
+          start: { dateTime: "2026-11-05T09:00:00Z" },
+          end: { dateTime: "2026-11-05T10:00:00Z" },
+        },
+        { id: "deleted-without-times", status: "cancelled" },
+        timedEvent("changed"),
+      ],
+      nextSyncToken: "cursor-2",
+    },
+  }));
+
+  const result = await client({}).syncWindow({
+    from: FROM,
+    to: TO,
+    syncToken: "cursor-1",
+  });
+  assert.equal(result.full, false);
+  assert.equal(result.nextSyncToken, "cursor-2");
+  assert.deepEqual(result.deletedExternalIds, ["deleted-without-times"]);
+  assert.deepEqual(
+    result.events.map((e) => `${e.externalId}:${e.status}`),
+    ["gone-event:cancelled", "changed:confirmed"],
+  );
+  const url = new URL(calls[0]);
+  assert.equal(url.searchParams.get("syncToken"), "cursor-1");
+  assert.equal(url.searchParams.get("showDeleted"), "true");
+  assert.equal(url.searchParams.get("timeMin"), null, "incremental ignores the window");
+});
+
+test("an expired sync token (410) transparently falls back to a full fetch", async (t) => {
+  const calls = stubFetch(t, (url) =>
+    url.searchParams.get("syncToken")
+      ? { status: 410, body: { error: { message: "Sync token is no longer valid" } } }
+      : {
+          status: 200,
+          body: { items: [timedEvent("after-410")], nextSyncToken: "cursor-fresh" },
+        },
+  );
+
+  const result = await client({}).syncWindow({
+    from: FROM,
+    to: TO,
+    syncToken: "stale-cursor",
+  });
+  assert.equal(result.full, true);
+  assert.equal(result.nextSyncToken, "cursor-fresh");
+  assert.deepEqual(result.events.map((e) => e.externalId), ["after-410"]);
+  assert.equal(calls.length, 2, "one incremental attempt, then a full window fetch");
+});
+
+test("a 429 list is retried once before succeeding", async (t) => {
+  let calls = 0;
+  stubFetch(t, () => {
+    calls += 1;
+    return calls === 1
+      ? { status: 429, body: { error: { message: "Rate Limit Exceeded" } } }
+      : { status: 200, body: { items: [timedEvent("after-retry")] } };
+  });
+  const result = await client({}).syncWindow({ from: FROM, to: TO });
+  assert.equal(calls, 2, "the rate limit was retried");
+  assert.deepEqual(result.events.map((e) => e.externalId), ["after-retry"]);
+});
+
 test("dev client filters fixture events to the window", async () => {
   const now = new Date("2026-10-25T08:00:00");
   const fixtures = defaultDevEvents(now);

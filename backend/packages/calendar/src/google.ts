@@ -6,6 +6,23 @@ const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const CALENDAR_ENDPOINT = "https://www.googleapis.com/calendar/v3/calendars";
 /** Google caps a page at 2500; more than this many pages means something is off. */
 const MAX_PAGES = 40;
+/** Transient list failures (429/5xx/network) are retried this many extra times. */
+const LIST_RETRIES = 2;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** One result of a full or incremental Google events fetch. */
+export interface CalendarSyncResult {
+  events: CalendarEvent[];
+  /** Events Google reported as deleted (incremental sync only). */
+  deletedExternalIds: string[];
+  /** Cursor for the next incremental sync; null when Google sent none. */
+  nextSyncToken: string | null;
+  /** True when the caller got a full window fetch (no usable sync token). */
+  full: boolean;
+}
 
 const REVOKE_ENDPOINT = "https://oauth2.googleapis.com/revoke";
 
@@ -293,6 +310,16 @@ export function createGoogleClient(opts: GoogleClientOptions): CalendarClient & 
     requestBody: Record<string, unknown>;
     sendUpdates?: "all" | "none";
   }): Promise<GoogleEventDetail>;
+  /**
+   * Fetch the sync window, incrementally when a sync token is supplied. A
+   * 410 (token expired) transparently falls back to a full fetch, because a
+   * cursor is an optimisation and never a reason to fail a sync.
+   */
+  syncWindow(input: {
+    from: Date;
+    to: Date;
+    syncToken?: string | null;
+  }): Promise<CalendarSyncResult>;
 } {
   let tokens = opts.tokens;
   const calendarId = encodeURIComponent(opts.calendarId ?? "primary");
@@ -327,11 +354,45 @@ export function createGoogleClient(opts: GoogleClientOptions): CalendarClient & 
     await refresh();
   }
 
-  async function fetchPage(
-    from: Date,
-    to: Date,
-    pageToken?: string,
-  ): Promise<Record<string, any>> {
+  /**
+   * Fetch a read endpoint with bounded retries for rate limits, 5xx and
+   * network failures. Retry-After is honoured (capped at 2s), so a quota
+   * blip does not fail a user's calendar read or a whole sync tick.
+   */
+  async function fetchRead(
+    url: URL,
+    accessToken: string,
+    retries = LIST_RETRIES,
+  ): Promise<Response> {
+    for (let attempt = 0; ; attempt++) {
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+      } catch (err) {
+        if (attempt >= retries) throw err;
+        await sleep(250 * 2 ** attempt);
+        continue;
+      }
+      if ((res.status === 429 || res.status >= 500) && attempt < retries) {
+        await sleep(retryAfterMs(res, attempt));
+        continue;
+      }
+      return res;
+    }
+  }
+
+  function retryAfterMs(res: Response, attempt: number): number {
+    const header = res.headers.get("retry-after");
+    const seconds = Number(header);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.min(seconds * 1000, 2000);
+    }
+    return Math.min(250 * 2 ** attempt, 2000);
+  }
+
+  function windowUrl(from: Date, to: Date, pageToken?: string): URL {
     const url = new URL(`${CALENDAR_ENDPOINT}/${calendarId}/events`);
     url.searchParams.set("timeMin", from.toISOString());
     url.searchParams.set("timeMax", to.toISOString());
@@ -339,10 +400,21 @@ export function createGoogleClient(opts: GoogleClientOptions): CalendarClient & 
     url.searchParams.set("orderBy", "startTime");
     url.searchParams.set("maxResults", "2500");
     if (pageToken) url.searchParams.set("pageToken", pageToken);
+    return url;
+  }
 
-    const res = await fetch(url, {
-      headers: { Authorization: `Bearer ${tokens.accessToken}` },
-    });
+  function syncUrl(syncToken: string, pageToken?: string): URL {
+    const url = new URL(`${CALENDAR_ENDPOINT}/${calendarId}/events`);
+    url.searchParams.set("syncToken", syncToken);
+    url.searchParams.set("showDeleted", "true");
+    url.searchParams.set("singleEvents", "true");
+    url.searchParams.set("maxResults", "2500");
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+    return url;
+  }
+
+  async function readPage(url: URL): Promise<Record<string, any>> {
+    const res = await fetchRead(url, tokens.accessToken);
     const data = (await res.json().catch(() => ({}))) as Record<string, any>;
     if (!res.ok) {
       if (res.status === 401) {
@@ -358,6 +430,14 @@ export function createGoogleClient(opts: GoogleClientOptions): CalendarClient & 
       );
     }
     return data;
+  }
+
+  async function fetchPage(
+    from: Date,
+    to: Date,
+    pageToken?: string,
+  ): Promise<Record<string, any>> {
+    return readPage(windowUrl(from, to, pageToken));
   }
 
   function eventUrl(eventId: string): string {
@@ -379,6 +459,73 @@ export function createGoogleClient(opts: GoogleClientOptions): CalendarClient & 
     }
     await refresh();
     return doRequest(tokens.accessToken);
+  }
+
+  async function fetchWindow(
+    from: Date,
+    to: Date,
+  ): Promise<CalendarSyncResult> {
+    let data = await fetchPage(from, to);
+    const events: CalendarEvent[] = [];
+    const deletedExternalIds: string[] = [];
+    let nextSyncToken: string | null = null;
+
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const items: Record<string, any>[] = Array.isArray(data.items) ? data.items : [];
+      for (const item of items) {
+        const mapped = mapGoogleEvent(item, timezone);
+        if (mapped) events.push(mapped);
+      }
+      if (typeof data.nextSyncToken === "string" && data.nextSyncToken) {
+        nextSyncToken = data.nextSyncToken;
+      }
+      const next = data.nextPageToken;
+      if (typeof next !== "string" || next.length === 0) {
+        return { events, deletedExternalIds, nextSyncToken, full: true };
+      }
+      data = await fetchPage(from, to, next);
+    }
+    throw new Error(
+      `Google Calendar list did not finish after ${MAX_PAGES} pages`,
+    );
+  }
+
+  async function fetchIncremental(
+    syncToken: string,
+  ): Promise<CalendarSyncResult> {
+    let data = await readPage(syncUrl(syncToken));
+    const events: CalendarEvent[] = [];
+    const deletedExternalIds: string[] = [];
+    let nextSyncToken: string | null = null;
+
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const items: Record<string, any>[] = Array.isArray(data.items) ? data.items : [];
+      for (const item of items) {
+        if (item?.status === "cancelled") {
+          if (typeof item.id === "string" && item.id) {
+            const mapped = mapGoogleEvent(item, timezone);
+            if (mapped) events.push(mapped);
+            else deletedExternalIds.push(item.id);
+          }
+          continue;
+        }
+        const mapped = mapGoogleEvent(item, timezone);
+        if (mapped) events.push(mapped);
+      }
+      if (typeof data.nextSyncToken === "string" && data.nextSyncToken) {
+        nextSyncToken = data.nextSyncToken;
+      }
+      const next = data.nextPageToken;
+      if (typeof next !== "string" || next.length === 0) {
+        return { events, deletedExternalIds, nextSyncToken, full: false };
+      }
+      data = await readPage(syncUrl(syncToken, next));
+    }
+    // An incomplete incremental page set must not advance the cursor: the
+    // next run would silently skip whatever we did not read.
+    throw new Error(
+      `Google Calendar incremental sync did not finish after ${MAX_PAGES} pages`,
+    );
   }
 
   return {
@@ -564,9 +711,9 @@ export function createGoogleClient(opts: GoogleClientOptions): CalendarClient & 
     async listEvents(from, to): Promise<CalendarEvent[]> {
       await ensureFreshToken();
 
-      let data: Record<string, any>;
       try {
-        data = await fetchPage(from, to);
+        const result = await fetchWindow(from, to);
+        return result.events;
       } catch (err) {
         // A stale-but-not-expired token: force one refresh and retry, which
         // is the only case where a 401 is recoverable at all.
@@ -575,25 +722,37 @@ export function createGoogleClient(opts: GoogleClientOptions): CalendarClient & 
         }
         if (!tokens.refreshToken) throw err;
         await refresh();
-        data = await fetchPage(from, to);
+        return (await fetchWindow(from, to)).events;
       }
+    },
 
-      const events: CalendarEvent[] = [];
-      for (let page = 0; page < MAX_PAGES; page++) {
-        const items: Record<string, any>[] = Array.isArray(data.items) ? data.items : [];
-        for (const item of items) {
-          const mapped = mapGoogleEvent(item, timezone);
-          if (mapped) events.push(mapped);
+    async syncWindow(input): Promise<CalendarSyncResult> {
+      await ensureFreshToken();
+
+      const run = async (): Promise<CalendarSyncResult> => {
+        if (!input.syncToken) return fetchWindow(input.from, input.to);
+        try {
+          return await fetchIncremental(input.syncToken);
+        } catch (err) {
+          // 410 GONE means the cursor is too old. Fall back to a full fetch
+          // rather than failing the account's sync.
+          if (err instanceof Error && /\b410\b/.test(err.message)) {
+            return fetchWindow(input.from, input.to);
+          }
+          throw err;
         }
-        const next = data.nextPageToken;
-        if (typeof next !== "string" || next.length === 0) return events;
-        data = await fetchPage(from, to, next);
+      };
+
+      try {
+        return await run();
+      } catch (err) {
+        if (!(err instanceof CalendarAuthError) || err.code !== "invalid_token") {
+          throw err;
+        }
+        if (!tokens.refreshToken) throw err;
+        await refresh();
+        return run();
       }
-      // Reconciling by absence is only safe on a complete list, so a list we
-      // could not finish must fail loudly instead of looking truncated.
-      throw new Error(
-        `Google Calendar list did not finish after ${MAX_PAGES} pages`,
-      );
     },
   };
 }

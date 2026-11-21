@@ -4,6 +4,7 @@ import { createConfiguredAlarm } from "./alarm.js";
 import { env } from "./config/env.js";
 import { materialize, seedDevCalendars, syncCalendars, type WorkerConfig } from "./sync.js";
 import { dispatchDue } from "./dispatch.js";
+import { cleanupDocumentArtifacts, processDocumentJobs } from "./documents.js";
 
 async function main(): Promise<void> {
   const db = createDb(env.databaseUrl(), { max: 5 });
@@ -36,6 +37,9 @@ async function main(): Promise<void> {
     batchSize: env.batchSize,
     devCalendar: env.devCalendar,
     google: env.google,
+    maxSyncAttempts: env.maxSyncAttempts,
+    llm: env.llm,
+    document: env.document,
     template: env.reminderTemplate,
     publicBaseUrl: env.publicBaseUrl,
     oauthStateSecret: env.oauthStateSecret,
@@ -51,6 +55,15 @@ async function main(): Promise<void> {
   );
   console.log(
     `[worker]   alarms:    ${alarm ? `${alarm.kind} (reminders flagged as alarms will ring)` : "off"}`,
+  );
+  console.log(
+    `[worker]   tokens:    ${env.google.tokenKey ? "encrypted at rest (AES-256-GCM)" : "plaintext legacy rows"}`,
+  );
+  console.log(
+    `[worker]   documents: every ${env.document.pollMs}ms, ${env.document.concurrency} at a time, ${env.document.retentionDays}d retention`,
+  );
+  console.log(
+    `[worker]   authoring: ${env.llm.apiKey ? `${env.llm.model} @ ${env.llm.baseUrl}` : "deterministic draft (set LLM_API_KEY for full content)"}`,
   );
 
   let running = false;
@@ -77,9 +90,41 @@ async function main(): Promise<void> {
   await tick();
   const timer = setInterval(() => void tick(), env.tickMs);
 
+  // Document generation runs on its own loop so a multi-second render never
+  // delays the reminder ladder (and vice versa).
+  let documentsRunning = false;
+  async function documentTick(): Promise<void> {
+    if (documentsRunning) return;
+    documentsRunning = true;
+    try {
+      const { claimed, sent, failed } = await processDocumentJobs(cfg);
+      if (claimed > 0) {
+        console.log(
+          `[worker] documents: claimed=${claimed} sent=${sent} failed=${failed}`,
+        );
+      }
+    } catch (err) {
+      console.error("[worker] document tick failed:", err);
+    } finally {
+      documentsRunning = false;
+    }
+  }
+
+  await documentTick();
+  const documentTimer = setInterval(
+    () => void documentTick(),
+    env.document.pollMs,
+  );
+  const cleanupTimer = setInterval(() => {
+    void cleanupDocumentArtifacts(cfg);
+  }, 60 * 60_000);
+  void cleanupDocumentArtifacts(cfg);
+
   const shutdown = async (signal: string): Promise<void> => {
     console.log(`\n[worker] ${signal} — shutting down`);
     clearInterval(timer);
+    clearInterval(documentTimer);
+    clearInterval(cleanupTimer);
     await db.end().catch(() => {});
     process.exit(0);
   };

@@ -46,6 +46,11 @@ async function main(): Promise<void> {
       ? { clientId: env.google.clientId!, clientSecret: env.google.clientSecret!, tokenKey: env.google.tokenKey }
       : null,
     approvalTtlMinutes: env.approvalTtlMinutes,
+    calendarFreshnessMs: env.calendarFreshnessMs,
+    lookaheadDays: env.lookaheadDays,
+    reminderOffsets: env.reminderOffsets,
+    maxOffsetMinutes: env.maxOffsetMinutes,
+    document: env.document,
   };
 
   const app = createApp({

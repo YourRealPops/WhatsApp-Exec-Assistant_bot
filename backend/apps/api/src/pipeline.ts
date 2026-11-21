@@ -58,6 +58,12 @@ export interface PipelineDeps {
   google?: GoogleConfig | null;
   /** How long an approval stays valid (APPROVAL_TTL_MINUTES). */
   approvalTtlMinutes?: number;
+  /** On-demand calendar freshness and the document snapshot limits. */
+  calendarFreshnessMs?: number;
+  lookaheadDays?: number;
+  reminderOffsets?: number[];
+  maxOffsetMinutes?: number;
+  document?: { maxEvents: number; maxDays: number };
 }
 
 /**
@@ -110,6 +116,18 @@ export async function processInbound(
       }
       console.log(`[pipeline] ← ${user.phone}: ${msg.text ?? `[${msg.type}]`}`);
 
+      // Show the typing indicator on the *first* delivery only: the message
+      // above was just deduped, so a webhook retry never re-triggers it.
+      // Failures are logged, never allowed to block the answer.
+      void deps.sender
+        .sendTypingIndicator?.(msg.id)
+        .catch((err) =>
+          console.warn(
+            `[pipeline] typing indicator failed for ${msg.id}:`,
+            err instanceof Error ? err.message : err,
+          ),
+        );
+
       if (!msg.text) {
         await safeSend(
           deps,
@@ -125,6 +143,7 @@ export async function processInbound(
         text: msg.text,
         replyId: msg.replyId,
         excludeMessageId: msg.id,
+        messageId: msg.id,
       });
     } catch (err) {
       console.error(`[pipeline] failed on message ${msg.id}:`, err);
@@ -145,6 +164,8 @@ export async function handleUserText(
     /** Button id from a tapped reply button, when this turn was a tap. */
     replyId?: string | null;
     excludeMessageId?: string;
+    /** Meta's inbound message id — document job idempotency key. */
+    messageId?: string;
   },
 ): Promise<AgentResult> {
   let user = await getUserById(deps.db, opts.userId);
@@ -208,6 +229,12 @@ export async function handleUserText(
     needsConnect: !deps.google,
     approvalTtlMinutes: deps.approvalTtlMinutes,
     currentMessage: opts.text,
+    currentMessageId: opts.messageId,
+    freshnessMs: deps.calendarFreshnessMs,
+    lookaheadDays: deps.lookaheadDays,
+    reminderOffsets: deps.reminderOffsets,
+    maxOffsetMinutes: deps.maxOffsetMinutes,
+    document: deps.document,
   });
 
   const result = await dispatchOrRun({
@@ -245,8 +272,23 @@ export async function handleUserText(
     if (!payload?.proposalId || !payload.message) return [];
     return [{ proposalId: payload.proposalId, message: payload.message }];
   });
+  // A document request is acknowledged from the tool result, never from the
+  // model's imagination: the file has not been generated yet, let alone sent.
+  const documentAcKs = result.toolCalls.flatMap((call) => {
+    if (!call.ok || call.name !== "generate_document") return [];
+    const payload = call.result as { message?: string } | null;
+    return payload?.message ? [payload.message] : [];
+  });
+
   let reply = result.reply;
   let buttons: Button[] | undefined;
+  if (
+    documentAcKs.length > 0 &&
+    proposals.length === 0 &&
+    result.toolCalls.every((call) => call.ok)
+  ) {
+    reply = documentAcKs.join("\n\n");
+  }
   let saved: boolean;
   if (proposals.length === 1) {
     buttons = proposalButtons(proposals[0].proposalId);

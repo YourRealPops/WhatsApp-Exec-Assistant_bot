@@ -8,9 +8,30 @@ export interface Button {
   title: string;
 }
 
+/** A file to upload through the WhatsApp media endpoint. */
+export interface MediaFile {
+  data: Buffer | Uint8Array;
+  mimeType: string;
+  filename: string;
+}
+
 export interface Sender {
   readonly kind: string;
   sendText(to: string, text: string): Promise<string>;
+  /**
+   * Official WhatsApp typing indicator, tied to the inbound message id. It
+   * also marks that message read and disappears after 25s or on our reply.
+   */
+  sendTypingIndicator?(messageId: string): Promise<void>;
+  /** Upload a file to the Cloud API media store; returns the media id. */
+  uploadMedia?(file: MediaFile): Promise<string>;
+  /** Send an already-uploaded file as a document attachment. */
+  sendDocument?(
+    to: string,
+    mediaId: string,
+    filename: string,
+    caption?: string,
+  ): Promise<string>;
   /**
    * Text plus tappable reply buttons. Taps come back as inbound interactive
    * messages carrying the button id, so approvals never rely on free text.
@@ -47,6 +68,23 @@ export function createConsoleSender(label = "console"): Sender {
       );
       return `console:${randomUUID()}`;
     },
+    async sendTypingIndicator(messageId) {
+      console.log(`[whatsapp:console] typing… (for ${messageId})`);
+    },
+    async uploadMedia(file) {
+      console.log(
+        `[whatsapp:console] uploaded ${file.filename} (${file.mimeType}, ${file.data.length} bytes)`,
+      );
+      return `console-media:${randomUUID()}`;
+    },
+    async sendDocument(to, mediaId, filename, caption) {
+      console.log(
+        `\n[whatsapp:console] → ${to} (document ${filename}, media ${mediaId})` +
+          (caption ? `\n${caption}` : "") +
+          "\n",
+      );
+      return `console:${randomUUID()}`;
+    },
   };
 }
 
@@ -60,7 +98,7 @@ export interface CloudApiConfig {
 export function createCloudApiSender(cfg: CloudApiConfig): Sender {
   const endpoint = `https://graph.facebook.com/${cfg.apiVersion ?? "v21.0"}/${cfg.phoneNumberId}/messages`;
 
-  async function post(payload: Record<string, unknown>): Promise<string> {
+  async function post(payload: Record<string, unknown>): Promise<Record<string, any>> {
     const res = await fetch(endpoint, {
       method: "POST",
       headers: {
@@ -71,16 +109,22 @@ export function createCloudApiSender(cfg: CloudApiConfig): Sender {
     });
     const data = (await res.json().catch(() => ({}))) as Record<string, any>;
     if (!res.ok) {
+      const code = data?.error?.code ? ` [${data.error.code}]` : "";
       const detail = data?.error?.message ?? JSON.stringify(data);
-      throw new Error(`WhatsApp send failed (${res.status}): ${detail}`);
+      throw new Error(`WhatsApp send failed (${res.status})${code}: ${detail}`);
     }
+    return data;
+  }
+
+  async function postMessage(payload: Record<string, unknown>): Promise<string> {
+    const data = await post(payload);
     return data?.messages?.[0]?.id ?? "";
   }
 
   return {
     kind: "whatsapp-cloud",
     async sendText(to, text) {
-      return post({
+      return postMessage({
         messaging_product: "whatsapp",
         to,
         type: "text",
@@ -88,7 +132,7 @@ export function createCloudApiSender(cfg: CloudApiConfig): Sender {
       });
     },
     async sendButtons(to, text, buttons) {
-      return post({
+      return postMessage({
         messaging_product: "whatsapp",
         to,
         type: "interactive",
@@ -105,7 +149,7 @@ export function createCloudApiSender(cfg: CloudApiConfig): Sender {
       });
     },
     async sendTemplate(to, name, language, params) {
-      return post({
+      return postMessage({
         messaging_product: "whatsapp",
         to,
         type: "template",
@@ -116,6 +160,50 @@ export function createCloudApiSender(cfg: CloudApiConfig): Sender {
             params.length > 0
               ? [{ type: "body", parameters: params.map((p) => ({ type: "text", text: p })) }]
               : undefined,
+        },
+      });
+    },
+    async sendTypingIndicator(messageId) {
+      // The documented call: a read receipt for the inbound message, with the
+      // typing indicator attached. It is not a message and returns success.
+      await post({
+        messaging_product: "whatsapp",
+        status: "read",
+        message_id: messageId,
+        typing_indicator: { type: "text" },
+      });
+    },
+    async uploadMedia(file) {
+      const form = new FormData();
+      form.append("messaging_product", "whatsapp");
+      form.append("type", file.mimeType);
+      form.append(
+        "file",
+        new Blob([new Uint8Array(file.data)], { type: file.mimeType }),
+        file.filename,
+      );
+      const res = await fetch(`${endpoint.replace(/\/messages$/, "")}/media`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${cfg.accessToken}` },
+        body: form,
+      });
+      const data = (await res.json().catch(() => ({}))) as Record<string, any>;
+      if (!res.ok || typeof data.id !== "string") {
+        const code = data?.error?.code ? ` [${data.error.code}]` : "";
+        const detail = data?.error?.message ?? JSON.stringify(data);
+        throw new Error(`WhatsApp media upload failed (${res.status})${code}: ${detail}`);
+      }
+      return data.id;
+    },
+    async sendDocument(to, mediaId, filename, caption) {
+      return postMessage({
+        messaging_product: "whatsapp",
+        to,
+        type: "document",
+        document: {
+          id: mediaId,
+          filename,
+          ...(caption ? { caption: caption.slice(0, 1024) } : {}),
         },
       });
     },

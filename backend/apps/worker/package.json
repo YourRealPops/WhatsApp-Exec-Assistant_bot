@@ -8,12 +8,13 @@
     "start": "node dist/index.js",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/alarm.test.ts src/sync.test.ts"
+    "test": "node --import tsx --test src/alarm.test.ts src/sync.test.ts src/document-content.test.ts"
   },
   "dependencies": {
     "@exec-assistant/ai": "workspace:*",
     "@exec-assistant/calendar": "workspace:*",
     "@exec-assistant/db": "workspace:*",
+    "@exec-assistant/documents": "workspace:*",
     "@exec-assistant/whatsapp": "workspace:*",
     "dotenv": "^16.4.5"
   },

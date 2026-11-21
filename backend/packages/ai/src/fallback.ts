@@ -4,6 +4,7 @@ import type {
   ConnectionStatusResult,
   DisconnectResult,
   FindFreeTimeResult,
+  GenerateDocumentResult,
   ListEventsResult,
   ListRemindersResult,
   ManageConnectionsResult,
@@ -52,7 +53,13 @@ function timeLabel(iso: string, tz: string): string {
 
 function formatEvents(res: ListEventsResult | null, tz: string): string {
   if (!res) return "I couldn't read the calendar just now — try again in a moment.";
-  if (res.events.length === 0) return `Nothing on the calendar for ${res.date}.`;
+  const warning =
+    res.freshness?.stale && res.freshness.warning
+      ? `Note: ${res.freshness.warning}\n`
+      : "";
+  if (res.events.length === 0) {
+    return `${warning}Nothing on the calendar for ${res.date}.`;
+  }
   const lines = res.events.map((e) => {
     // All-day events are dates, so a clock range would be noise (and, before
     // we anchored them locally, the wrong day).
@@ -61,7 +68,7 @@ function formatEvents(res: ListEventsResult | null, tz: string): string {
       : `${timeLabel(e.start, tz)}–${timeLabel(e.end, tz)}`;
     return `- ${when} ${e.title}${e.location ? ` (${e.location})` : ""}`;
   });
-  return `Schedule for ${res.date}:\n${lines.join("\n")}`;
+  return `${warning}Schedule for ${res.date}:\n${lines.join("\n")}`;
 }
 
 function formatReminders(res: ListRemindersResult | null, tz: string): string {
@@ -74,11 +81,25 @@ function formatReminders(res: ListRemindersResult | null, tz: string): string {
   return `Upcoming reminders:\n${lines.join("\n")}`;
 }
 
+function documentTopic(text: string): string {
+  const topic = text
+    .replace(
+      /^(?:please\s+)?(?:can you\s+)?(?:create|make|generate|prepare|build|write|draft|send|give)\s+(?:me\s+)?(?:a|an|the)?\s*(?:(?:pdf|docx|word|pptx|powerpoint|slide|slides|presentation|document|report|summary)\s*)*(?:about|on|containing|covering|for|of)?\s*/i,
+      "",
+    )
+    .replace(/\bwith\s+\d{1,2}\s+slides?\b/gi, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/[.?!]+$/g, "");
+  return topic.slice(0, 140) || "General document";
+}
+
 function formatSlots(res: FindFreeTimeResult | null, tz: string): string {
   if (!res) return "I couldn't scan your calendar right now.";
-  if (res.slots.length === 0) return `No free slots left on ${res.date}.`;
+  const warning = res.warning ? `Note: ${res.warning}\n` : "";
+  if (res.slots.length === 0) return `${warning}No free slots left on ${res.date}.`;
   const lines = res.slots.map((s) => `- ${timeLabel(s.start, tz)}–${timeLabel(s.end, tz)}`);
-  return `Free on ${res.date}:\n${lines.join("\n")}`;
+  return `${warning}Free on ${res.date}:\n${lines.join("\n")}`;
 }
 
 /**
@@ -199,6 +220,59 @@ export async function runFallbackAgent(deps: AgentDeps): Promise<AgentResult> {
       `Google will ask for permission to view and edit your calendar events. Nothing changes without your approval.
 Open this link within ${probe.expiresInMinutes} minutes to connect Google Calendar:
 ${probe.url}`
+    );
+  }
+
+  // Document requests without an LLM: "create a PDF summary of next week".
+  const documentFormat = /\bpdf\b/.test(t)
+    ? ("pdf" as const)
+    : /\b(docx|word)\b/.test(t)
+      ? ("docx" as const)
+      : /\b(pptx|powerpoint|slides?|presentation)\b/.test(t)
+        ? ("pptx" as const)
+        : null;
+  if (
+    documentFormat &&
+    /\b(create|make|generate|prepare|build|send|give|write|draft)\b/.test(t) &&
+    /\b(document|pdf|docx|word|pptx|powerpoint|slide|presentation|summary|calendar|schedule|events?|report|proposal|briefing|guide)\b/.test(t)
+  ) {
+    const calendarDoc =
+      /\b(calendar|schedule|meetings?|appointments?|events?|agenda)\b/.test(t) ||
+      (/\b(today|tomorrow|tonight|next week|this week)\b/.test(t) &&
+        !/\b(about|containing|covering)\b/.test(t));
+    const res: GenerateDocumentResult | null = calendarDoc
+      ? await (async () => {
+          const explicitDays = Number(t.match(/\bnext\s+(\d{1,2})\s+days?\b/)?.[1]);
+          const days = /next month/.test(t)
+            ? 30
+            : /next week/.test(t)
+              ? 7
+              : Number.isFinite(explicitDays) && explicitDays > 0
+                ? explicitDays
+                : /\b(today|tomorrow|tonight)\b/.test(t)
+                  ? 1
+                  : 7;
+          return call("generate_document", {
+            format: documentFormat,
+            source: "calendar",
+            date,
+            days,
+          });
+        })()
+      : await (async () => {
+          const slides = Number(t.match(/\b(\d{1,2})\s+slides?\b/)?.[1]);
+          const topic = documentTopic(text);
+          return call("generate_document", {
+            format: documentFormat,
+            source: "general",
+            topic,
+            prompt: text,
+            ...(Number.isFinite(slides) && slides > 0 ? { slide_count: slides } : {}),
+          });
+        })();
+    return reply(
+      res?.message ??
+        "I couldn't start that document — try again in a moment.",
     );
   }
 

@@ -52,6 +52,14 @@ export interface CalendarAccount {
   last_sync_error: string | null;
   /** Google rejected the grant; the account is paused until the user reconnects. */
   reauth_required_at: Date | null;
+  /** Google incremental sync token; null means the next fetch is a full sync. */
+  sync_token: string | null;
+  /** When the account is next due a sync (success interval or failure backoff). */
+  next_sync_at: Date | null;
+  /** Held while a worker is syncing this account (concurrency guard). */
+  sync_lock_at: Date | null;
+  /** Consecutive failed syncs, used for exponential backoff. */
+  sync_attempts: number;
   created_at: Date;
   /** Joined from users by listAccountsDueSync, for reconnect messages. */
   phone?: string | null;
@@ -234,7 +242,11 @@ export async function upsertCalendarAccount(
       connected_at = now(),
       synced_at = null,
       last_sync_error = null,
-      reauth_required_at = null
+      reauth_required_at = null,
+      sync_token = null,
+      next_sync_at = null,
+      sync_lock_at = null,
+      sync_attempts = 0
     returning *`;
   return rows[0] as unknown as CalendarAccount;
 }
@@ -249,23 +261,52 @@ export async function getCalendarAccount(
 }
 
 /**
- * Accounts whose grant still works and whose last sync is old enough.
+ * Accounts that are due a sync. `next_sync_at` is authoritative: a successful
+ * sync schedules the next interval, a failure schedules a backed-off retry.
  * Accounts flagged for reauth are paused until the user reconnects, so a dead
- * token can't hot-loop every tick.
+ * token can't hot-loop every tick. A lock older than 10 minutes is treated as
+ * abandoned (the worker died mid-sync) and may be reclaimed.
+ *
+ * `intervalMs` is kept for callers that only ever pass it through; a never
+ * synced account (next_sync_at is null) is always due.
  */
 export async function listAccountsDueSync(
   db: Db,
   intervalMs: number
 ): Promise<CalendarAccount[]> {
-  const cutoff = new Date(Date.now() - intervalMs);
+  const fallbackCutoff = new Date(Date.now() - intervalMs);
   const rows = await db`
     select a.*, u.phone, u.timezone
     from calendar_accounts a
     join users u on u.id = a.user_id
     where a.reauth_required_at is null
-      and (a.synced_at is null or a.synced_at < ${cutoff})
-    order by a.synced_at nulls first`;
+      and (a.sync_lock_at is null or a.sync_lock_at < now() - interval '10 minutes')
+      and (
+        (a.next_sync_at is not null and a.next_sync_at <= now())
+        or (
+          a.next_sync_at is null
+          and (a.synced_at is null or a.synced_at < ${fallbackCutoff})
+        )
+      )
+    order by a.next_sync_at nulls first, a.synced_at nulls first`;
   return rows as unknown as CalendarAccount[];
+}
+
+/**
+ * Atomically take the per-account sync lock. Returns false when another worker
+ * already owns this account, so two workers never fetch the same calendar.
+ */
+export async function claimAccountForSync(
+  db: Db,
+  accountId: string
+): Promise<boolean> {
+  const rows = await db`
+    update calendar_accounts
+    set sync_lock_at = now()
+    where id = ${accountId}
+      and (sync_lock_at is null or sync_lock_at < now() - interval '10 minutes')
+    returning id`;
+  return rows.length > 0;
 }
 
 /**
@@ -284,15 +325,67 @@ export async function markReauthRequired(
   return rows.length > 0;
 }
 
+export interface MarkSyncedOptions {
+  /** null means the sync was clean. */
+  error?: string | null;
+  /** When this account is next due; null clears the schedule. */
+  nextSyncAt?: Date | null;
+  /**
+   * Google's incremental cursor after a successful fetch. Omit to keep the
+   * stored value, pass null to clear it (an expired cursor on a full sync).
+   */
+  syncToken?: string | null;
+  /** Reset to 0 after success; a failure path uses recordSyncFailure. */
+  attempts?: number;
+}
+
+/** A successful sync: data is now current, so synced_at moves. */
 export async function markSynced(
   db: Db,
   accountId: string,
-  error: string | null = null
+  opts: MarkSyncedOptions | string | null = {}
+): Promise<void> {
+  const options: MarkSyncedOptions =
+    typeof opts === "string" || opts === null ? { error: opts } : opts;
+  await db`
+    update calendar_accounts
+    set synced_at = now(),
+        last_sync_error = ${options.error ?? null},
+        next_sync_at = ${options.nextSyncAt ?? null},
+        sync_lock_at = null,
+        sync_attempts = ${options.attempts ?? 0},
+        sync_token = case
+          when ${options.syncToken === undefined}::boolean then sync_token
+          else ${options.syncToken ?? null}
+        end
+    where id = ${accountId}`;
+}
+
+/**
+ * A failed refresh. synced_at is deliberately left untouched: the stored
+ * events are still the old ones, and reporting a new sync time would present
+ * stale data as current. The account is retried after a backoff.
+ */
+export async function recordSyncFailure(
+  db: Db,
+  accountId: string,
+  error: string,
+  attempts: number,
+  nextSyncAt: Date
 ): Promise<void> {
   await db`
     update calendar_accounts
-    set synced_at = now(), last_sync_error = ${error}
+    set last_sync_error = ${error},
+        sync_attempts = ${attempts},
+        next_sync_at = ${nextSyncAt},
+        sync_lock_at = null
     where id = ${accountId}`;
+}
+
+/** Drop the incremental token so the next sync fetches the full window. */
+export async function clearSyncToken(db: Db, accountId: string): Promise<void> {
+  await db`
+    update calendar_accounts set sync_token = null where id = ${accountId}`;
 }
 
 /**
@@ -1040,4 +1133,277 @@ export async function cancelEventReminders(
     removed += rows.count;
   }
   return removed;
+}
+
+/**
+ * Incremental sync reports deleted events by external id (status cancelled).
+ * Cancel our copies and drop their still-pending reminders in one statement.
+ */
+export async function cancelEventsByExternalIds(
+  db: Db,
+  userId: string,
+  externalIds: string[]
+): Promise<{ cancelled: number; remindersRemoved: number }> {
+  if (externalIds.length === 0) return { cancelled: 0, remindersRemoved: 0 };
+  const rows = await db`
+    with gone as (
+      update events
+      set status = 'cancelled', updated_at = now()
+      where user_id = ${userId}
+        and external_id = any(${externalIds}::text[])
+        and status <> 'cancelled'
+      returning id
+    ), dropped as (
+      delete from reminders
+      where event_id in (select id from gone) and status = 'pending'
+      returning id
+    )
+    select
+      (select count(*)::int from gone) as cancelled,
+      (select count(*)::int from dropped) as reminders_removed`;
+  const row = rows[0] as unknown as {
+    cancelled: number;
+    reminders_removed: number;
+  };
+  return { cancelled: row.cancelled, remindersRemoved: row.reminders_removed };
+}
+
+// ---------------------------------------------------------------------------
+// Document jobs (queued by the API, rendered and delivered by the worker)
+// ---------------------------------------------------------------------------
+
+export type DocumentKind = "pdf" | "docx" | "pptx";
+export type DocumentJobStatus =
+  | "queued"
+  | "generating"
+  | "uploading"
+  | "sent"
+  | "failed";
+
+export type DocumentJobSource = "calendar" | "general";
+
+/**
+ * A calendar snapshot or a general-purpose writing brief. `source` is absent
+ * on rows created before general documents existed; those are calendar jobs.
+ */
+export interface DocumentJobPayload {
+  source?: DocumentJobSource;
+  /** Calendar fields (also the pre-general-document shape). */
+  timezone?: string;
+  rangeLabel?: string;
+  events?: Array<{
+    title: string;
+    start: string;
+    end: string;
+    allDay?: boolean;
+    location?: string | null;
+    description?: string | null;
+  }>;
+  /** General-document brief. */
+  subject?: string;
+  prompt?: string;
+  audience?: string;
+  tone?: string;
+  /** Requested outline or section headings, one per line. */
+  structure?: string;
+  slideCount?: number;
+  generatedFor?: string | null;
+}
+
+export interface DocumentJob {
+  id: string;
+  user_id: string;
+  request_message_id: string;
+  kind: DocumentKind;
+  title: string;
+  payload: DocumentJobPayload;
+  status: DocumentJobStatus;
+  attempts: number;
+  max_attempts: number;
+  next_attempt_at: Date | null;
+  error: string | null;
+  wa_media_id: string | null;
+  wa_message_id: string | null;
+  created_at: Date;
+  started_at: Date | null;
+  completed_at: Date | null;
+  updated_at: Date;
+}
+
+/** A claimed job with everything delivery needs, joined from users. */
+export interface DocumentJobDetail extends DocumentJob {
+  phone: string;
+  user_name: string | null;
+  user_timezone: string;
+}
+
+/**
+ * Create the job for one user request. `request_message_id` is unique, so a
+ * redelivered webhook returns the existing job instead of generating twice.
+ */
+export async function createDocumentJob(
+  db: Db,
+  input: {
+    userId: string;
+    requestMessageId: string;
+    kind: DocumentKind;
+    title: string;
+    payload: DocumentJobPayload;
+  }
+): Promise<DocumentJob> {
+  const rows = await db`
+    insert into document_jobs
+      (user_id, request_message_id, kind, title, payload)
+    values
+      (${input.userId}, ${input.requestMessageId}, ${input.kind},
+       ${input.title}, ${jsonb(db, input.payload)})
+    on conflict (request_message_id) do update
+      set request_message_id = document_jobs.request_message_id
+      where document_jobs.user_id = excluded.user_id
+    returning *`;
+  if (rows[0]) return rows[0] as unknown as DocumentJob;
+  // The id exists but belongs to another user. Never return it: the caller
+  // would otherwise create an acknowledgement for someone else's job.
+  const existing = await db`
+    select user_id from document_jobs where request_message_id = ${input.requestMessageId}`;
+  if (existing[0]) {
+    throw new Error("that request message id belongs to another user");
+  }
+  // The row disappeared between the upsert and the lookup.
+  throw new Error("could not create the document job");
+}
+
+export async function getDocumentJob(
+  db: Db,
+  id: string
+): Promise<DocumentJob | null> {
+  const rows = await db`select * from document_jobs where id = ${id}`;
+  return (rows[0] as unknown as DocumentJob) ?? null;
+}
+
+/**
+ * Claim up to `limit` queued jobs atomically. Two workers can run in parallel
+ * without ever picking up the same job.
+ */
+export async function claimDocumentJobs(
+  db: Db,
+  limit: number
+): Promise<DocumentJobDetail[]> {
+  const rows = await db`
+    with claimed as (
+      update document_jobs
+      set status = 'generating',
+          attempts = attempts + 1,
+          started_at = now(),
+          updated_at = now()
+      where id in (
+        select j.id from document_jobs j
+        where j.status = 'queued'
+          and (j.next_attempt_at is null or j.next_attempt_at <= now())
+          and j.attempts < j.max_attempts
+        order by j.created_at
+        limit ${limit}
+        for update skip locked
+      )
+      returning *
+    )
+    select c.*, u.phone, u.name as user_name, u.timezone as user_timezone
+    from claimed c
+    join users u on u.id = c.user_id
+    order by c.created_at`;
+  return rows as unknown as DocumentJobDetail[];
+}
+
+export async function markDocumentJobUploading(
+  db: Db,
+  id: string
+): Promise<void> {
+  await db`
+    update document_jobs
+    set status = 'uploading', updated_at = now()
+    where id = ${id} and status = 'generating'`;
+}
+
+/** Only call this after WhatsApp has accepted the document message. */
+export async function markDocumentJobSent(
+  db: Db,
+  id: string,
+  delivery: { mediaId: string | null; messageId: string | null }
+): Promise<void> {
+  await db`
+    update document_jobs
+    set status = 'sent',
+        wa_media_id = ${delivery.mediaId},
+        wa_message_id = ${delivery.messageId},
+        error = null,
+        completed_at = now(),
+        updated_at = now()
+    where id = ${id} and status in ('generating', 'uploading')`;
+}
+
+/**
+ * Record a failed attempt. Transient failures go back to the queue with a
+ * backoff; exhausted or permanent failures become terminal.
+ */
+export async function markDocumentJobFailed(
+  db: Db,
+  id: string,
+  error: string,
+  retry: boolean,
+  nextAttemptAt: Date | null = null
+): Promise<void> {
+  await db`
+    update document_jobs
+    set status = ${retry ? "queued" : "failed"},
+        error = ${error},
+        next_attempt_at = ${nextAttemptAt},
+        updated_at = now(),
+        completed_at = ${retry ? null : new Date()}
+    where id = ${id} and status in ('generating', 'uploading')`;
+}
+
+/**
+ * Return jobs stuck in generating/uploading (the worker died mid-job) to the
+ * queue, or fail them once they have used all their attempts. Mirrors the
+ * reminder recovery path so no job is silently lost across a restart.
+ */
+export async function requeueStuckDocumentJobs(
+  db: Db,
+  olderThanMinutes: number
+): Promise<number> {
+  const rows = await db`
+    update document_jobs
+    set status = case when attempts >= max_attempts then 'failed' else 'queued' end,
+        error = case when attempts >= max_attempts
+                     then 'worker died mid-job' else error end,
+        next_attempt_at = now(),
+        completed_at = case when attempts >= max_attempts then now() else completed_at end,
+        updated_at = now()
+    where status in ('generating', 'uploading')
+      and updated_at < now() - make_interval(mins => ${olderThanMinutes})
+    returning id`;
+  return rows.length;
+}
+
+/** Retention sweep: finished jobs (and their stored metadata) are deleted. */
+export async function cleanupDocumentJobs(
+  db: Db,
+  retentionDays: number
+): Promise<number> {
+  const rows = await db`
+    delete from document_jobs
+    where status in ('sent', 'failed')
+      and updated_at < now() - make_interval(days => ${retentionDays})
+    returning id`;
+  return rows.length;
+}
+
+/** Queue health, useful for logs and the implementation report. */
+export async function documentJobCounts(
+  db: Db
+): Promise<Record<string, number>> {
+  const rows = await db`select status, count(*)::int as count from document_jobs group by status`;
+  const out: Record<string, number> = {};
+  for (const row of rows) out[String(row.status)] = Number(row.count);
+  return out;
 }

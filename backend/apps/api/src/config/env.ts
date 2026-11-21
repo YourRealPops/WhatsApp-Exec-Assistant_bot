@@ -59,6 +59,17 @@ function systemTimezone(): string {
   }
 }
 
+/** Same ladder format as the worker: "15,10,5,0". */
+function parseOffsets(raw: string | undefined): number[] {
+  const list = (raw ?? "15,10,5,0")
+    .split(",")
+    .map((s) => Number(s.trim()))
+    .filter((n) => Number.isFinite(n) && n >= 0);
+  return list.length > 0 ? list : [15, 10, 5, 0];
+}
+
+const reminderOffsets = parseOffsets(optional("REMINDER_OFFSETS"));
+
 const port = Number(process.env.PORT ?? 3000);
 const publicBaseUrl = optional("PUBLIC_BASE_URL") ?? `http://localhost:${port}`;
 const googleClientId = optional("GOOGLE_CLIENT_ID");
@@ -152,6 +163,20 @@ export const env = {
     },
   },
   approvalTtlMinutes: num("APPROVAL_TTL_MINUTES", 15),
+  /**
+   * On-demand calendar reads refresh from Google when the local copy is older
+   * than this. 0 (the default) refreshes on every calendar read, so an event
+   * created directly in Google is visible on the next request. Set a positive
+   * number to batch reads and accept up to that much staleness.
+   */
+  calendarFreshnessMs: nonNegativeNum("CALENDAR_FRESHNESS_MIN", 0) * 60_000,
+  lookaheadDays: num("LOOKAHEAD_DAYS", 14),
+  reminderOffsets,
+  maxOffsetMinutes: Math.max(...reminderOffsets),
+  document: {
+    maxEvents: num("DOCUMENT_MAX_EVENTS", 500),
+    maxDays: num("DOCUMENT_MAX_DAYS", 31),
+  },
 };
 
 /** Cache for the lazily resolved AES-256-GCM token key (see `env.google.tokenKey`).
@@ -172,4 +197,11 @@ let googleTokenKeyCache: Buffer | undefined;
 function num(key: string, fallback: number): number {
   const value = Number(optional(key));
   return Number.isFinite(value) && value > 0 ? value : fallback;
+}
+
+function nonNegativeNum(key: string, fallback: number): number {
+  const raw = optional(key);
+  if (raw === undefined) return fallback;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : fallback;
 }

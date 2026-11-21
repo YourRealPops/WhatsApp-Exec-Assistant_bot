@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { verifyState } from "@exec-assistant/calendar";
 import type { CalendarAccount } from "@exec-assistant/db";
 import type { Sender } from "@exec-assistant/whatsapp";
-import { notifyReauth, type WorkerConfig } from "./sync.js";
+import { notifyReauth, syncRetryDelayMs, type WorkerConfig } from "./sync.js";
 
 const SECRET = "s".repeat(32);
 const UID = "6f1d5a3c-2b7e-4f5a-9c8d-0a1b2c3d4e5f";
@@ -45,6 +45,10 @@ function account(overrides: Partial<CalendarAccount> = {}): CalendarAccount {
     connected_at: null,
     last_sync_error: null,
     reauth_required_at: new Date("2026-11-05T12:00:00Z"),
+    sync_token: null,
+    next_sync_at: null,
+    sync_lock_at: null,
+    sync_attempts: 0,
     created_at: new Date("2026-11-01T00:00:00Z"),
     phone: PHONE,
     timezone: "Africa/Lagos",
@@ -65,10 +69,26 @@ function config(sender: Sender, overrides: Partial<WorkerConfig> = {}): WorkerCo
     batchSize: 50,
     devCalendar: false,
     google: {},
+    document: {
+      concurrency: 1,
+      pollMs: 5_000,
+      retentionDays: 7,
+      maxBytes: 16 * 1024 * 1024,
+      maxEvents: 500,
+    },
     template: { language: "en" },
     ...overrides,
   };
 }
+
+test("failed syncs back off exponentially, capped at the sync interval", () => {
+  const interval = 5 * 60_000;
+  assert.equal(syncRetryDelayMs(0, interval), 30_000);
+  assert.equal(syncRetryDelayMs(1, interval), 60_000);
+  assert.equal(syncRetryDelayMs(2, interval), 120_000);
+  assert.equal(syncRetryDelayMs(10, interval), interval, "never longer than the interval");
+  assert.equal(syncRetryDelayMs(0, 10_000), 10_000, "a short interval wins");
+});
 
 test("a dead grant messages the user a fresh signed connect link", async () => {
   const { sent, sender } = fakeSender();

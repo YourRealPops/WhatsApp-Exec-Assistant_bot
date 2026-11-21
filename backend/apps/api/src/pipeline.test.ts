@@ -2,7 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Db } from "@exec-assistant/db";
 import type { Sender } from "@exec-assistant/whatsapp";
-import { FIRST_CONTACT_GREETING, handleUserText, type PipelineDeps } from "./pipeline.js";
+import {
+  FIRST_CONTACT_GREETING,
+  handleUserText,
+  processInbound,
+  type PipelineDeps,
+} from "./pipeline.js";
 
 const UID = "6f1d5a3c-2b7e-4f5a-9c8d-0a1b2c3d4e5f";
 const PHONE = "+2348012345678";
@@ -34,6 +39,9 @@ function createFakeDb() {
   const fake = ((strings: TemplateStringsArray, ...values: unknown[]) => {
     const sql = strings.join("?");
     if (sql.includes("insert into messages")) {
+      if (messages.some((message) => message.id === String(values[0]))) {
+        return Promise.resolve([]);
+      }
       messages.push({
         id: String(values[0]),
         user_id: String(values[1]),
@@ -46,6 +54,19 @@ function createFakeDb() {
     if (sql.includes("from messages")) {
       // The repo asks for newest-first and reverses; keep that contract.
       return Promise.resolve([...messages].reverse());
+    }
+    if (sql.includes("insert into users")) return Promise.resolve([user]);
+    if (sql.includes("insert into document_jobs")) {
+      return Promise.resolve([
+        {
+          id: "job-1",
+          status: "queued",
+          user_id: UID,
+          kind: values[2],
+          title: values[3],
+          payload: values[4],
+        },
+      ]);
     }
     if (sql.includes("update users")) {
       // setUserProfile coalesces: an omitted field keeps its stored value.
@@ -60,12 +81,20 @@ function createFakeDb() {
   return { db: fake, messages, user };
 }
 
-function createSender() {
+function createSender(opts: { failTyping?: boolean } = {}) {
   const sent: string[] = [];
+  const typing: string[] = [];
+  const order: string[] = [];
   const sender: Sender = {
     kind: "test",
+    async sendTypingIndicator(messageId) {
+      typing.push(messageId);
+      order.push(`typing:${messageId}`);
+      if (opts.failTyping) throw new Error("typing unavailable");
+    },
     async sendText(_to, text) {
       sent.push(text);
+      order.push(`text:${text}`);
       return `test:${sent.length}`;
     },
     async sendTemplate(_to, name, _language, params) {
@@ -76,7 +105,7 @@ function createSender() {
       return `test:${sent.length}`;
     },
   };
-  return { sender, sent };
+  return { sender, sent, typing, order };
 }
 
 function deps(db: Db, sender: Sender): PipelineDeps {
@@ -88,6 +117,75 @@ function deps(db: Db, sender: Sender): PipelineDeps {
     defaultTimezone: "Africa/Lagos",
   };
 }
+
+test("a normal inbound message triggers one typing indicator before the reply", async () => {
+  const { db } = createFakeDb();
+  const { sender, typing, order } = createSender();
+  await processInbound(deps(db, sender), [
+    {
+      id: "wamid.typing.1",
+      from: PHONE,
+      type: "text",
+      text: "hello",
+      timestamp: new Date(),
+      replyId: null,
+    },
+  ]);
+  assert.deepEqual(typing, ["wamid.typing.1"]);
+  assert.equal(order[0], "typing:wamid.typing.1", "indicator goes first");
+  assert.ok(order.some((entry) => entry.startsWith("text:")), "the reply still sends");
+});
+
+test("calendar and document requests both show typing before work starts", async () => {
+  for (const [index, text] of [
+    "what's on my calendar today?",
+    "Create a PDF report about artificial intelligence",
+  ].entries()) {
+    const { db } = createFakeDb();
+    const { sender, typing } = createSender();
+    const id = `wamid.typing.request.${index}`;
+    await processInbound(deps(db, sender), [
+      { id, from: PHONE, type: "text", text, timestamp: new Date(), replyId: null },
+    ]);
+    assert.deepEqual(typing, [id], `typing for: ${text}`);
+  }
+});
+
+test("a failed typing indicator never blocks the reply", async () => {
+  const { db } = createFakeDb();
+  const { sender, sent } = createSender({ failTyping: true });
+  await processInbound(deps(db, sender), [
+    {
+      id: "wamid.typing.fail",
+      from: PHONE,
+      type: "text",
+      text: "hello",
+      timestamp: new Date(),
+      replyId: null,
+    },
+  ]);
+  assert.ok(sent.length > 0, "the bot still replies");
+});
+
+test("duplicate webhook delivery does not reprocess or re-trigger typing", async () => {
+  const { db, messages } = createFakeDb();
+  const { sender, typing, sent } = createSender();
+  const delivery = [
+    {
+      id: "wamid.dup.1",
+      from: PHONE,
+      type: "text" as const,
+      text: "hello",
+      timestamp: new Date(),
+      replyId: null,
+    },
+  ];
+  await processInbound(deps(db, sender), delivery);
+  await processInbound(deps(db, sender), delivery);
+  assert.deepEqual(typing, ["wamid.dup.1"]);
+  assert.equal(messages.filter((m) => m.id === "wamid.dup.1").length, 1);
+  assert.equal(sent.length, 1, "the reply is sent only once");
+});
 
 test("ECOS sends the introduction before it answers anything", async () => {
   const { db, messages } = createFakeDb();

@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { config as dotenvConfig } from "dotenv";
+import { parseTokenKey } from "@exec-assistant/calendar";
 
 /**
  * Load env files up the directory chain: the monorepo root .env is canonical
@@ -97,6 +98,30 @@ export const env = {
   google: {
     clientId: optional("GOOGLE_CLIENT_ID"),
     clientSecret: optional("GOOGLE_CLIENT_SECRET"),
+    /**
+     * At-rest token key. Required once the API stores encrypted v1: tokens:
+     * the worker must decrypt before calling Google and re-encrypt refreshes.
+     * A plaintext legacy row still works without it.
+     */
+    tokenKey: (() => {
+      const raw = optional("TOKEN_ENCRYPTION_KEY");
+      return raw ? parseTokenKey(raw) : null;
+    })(),
+  },
+  maxSyncAttempts: num("MAX_SYNC_ATTEMPTS", 3),
+  /** Same OpenAI-compatible settings as the API; powers general documents. */
+  llm: {
+    baseUrl: optional("LLM_BASE_URL") ?? "https://api.openai.com/v1",
+    apiKey: optional("LLM_API_KEY") ?? "",
+    model: optional("LLM_MODEL") ?? "gpt-4o-mini",
+  },
+  document: {
+    concurrency: Math.min(num("DOCUMENT_CONCURRENCY", 2), 5),
+    pollMs: num("DOCUMENT_POLL_MS", 5_000),
+    retentionDays: num("DOCUMENT_RETENTION_DAYS", 7),
+    maxBytes: num("DOCUMENT_MAX_BYTES", 16 * 1024 * 1024),
+    maxEvents: num("DOCUMENT_MAX_EVENTS", 500),
+    tmpDir: optional("DOCUMENT_TMP_DIR"),
   },
   /**
    * Reconnect links are minted here, so the worker needs the public URL and

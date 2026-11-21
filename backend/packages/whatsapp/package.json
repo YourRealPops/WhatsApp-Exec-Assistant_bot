@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --import tsx --test src/signature.test.ts src/webhook.test.ts"
+    "test": "node --import tsx --test src/signature.test.ts src/webhook.test.ts src/sender.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.5.0",
