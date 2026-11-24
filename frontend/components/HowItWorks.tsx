@@ -5,7 +5,7 @@ import Reveal from "./Reveal";
 const STEPS = [
   {
     title: "Save the number",
-    body: "One message opens the channel. ECOS greets you and picks up context from there.",
+    body: "One message opens the channel. eEA greets you and picks up context from there.",
   },
   {
     title: "Say what you need",

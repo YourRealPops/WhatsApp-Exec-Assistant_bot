@@ -126,7 +126,7 @@ export default function HeroCanvas() {
           <div className="top">
             <div className="av">EC</div>
             <div>
-              <b>ECOS</b>
+              <b>eEA</b>
               <span id="status">{status}</span>
             </div>
           </div>

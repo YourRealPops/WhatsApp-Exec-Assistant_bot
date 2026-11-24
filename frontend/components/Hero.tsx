@@ -35,15 +35,14 @@ export default function Hero() {
             variants={rise}
             transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
           >
-            Electronic Chief Of Staff
+            Electronic Executive Assistant
           </motion.span>
 
           <motion.h1
             variants={rise}
             transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
           >
-            Stop being your <span className="gradient-text">own</span> chief
-            of staff.
+            Run your day. <span className="gradient-text">Delegate</span> the rest.
           </motion.h1>
 
           <motion.p
@@ -51,9 +50,7 @@ export default function Hero() {
             variants={rise}
             transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
           >
-            ECOS lives inside WhatsApp. Hand it your calendar, your follow-ups
-            and the reminders you keep forgetting. It runs the logistics of
-            your day so you can stay on the work only you can do.
+            eEA lives inside WhatsApp. Tell it what needs to happen. It handles it, follows through, and keeps you in the loop, so you can stay on the work only you can do.
           </motion.p>
 
           <motion.div
@@ -61,7 +58,7 @@ export default function Hero() {
             variants={rise}
             transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
           >
-            <CtaButton>Chat with ECOS</CtaButton>
+            <CtaButton>Chat with eEA</CtaButton>
             <a className="btn btn-ghost" href="#capabilities">
               See what it handles
             </a>

@@ -11,8 +11,8 @@ export default function FinalCta() {
           <div className="cta-band">
             <span className="eyebrow">Get started</span>
             <h2>
-              Your next chief of staff is{" "}
-              <span className="gradient-text">one message away.</span>
+              Delegate your first task {" "}
+              <span className="gradient-text">in one message.</span>
             </h2>
             <p>
               Open WhatsApp, say hello, and hand over the first thing on your

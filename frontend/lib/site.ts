@@ -9,14 +9,14 @@ const number = process.env.NEXT_PUBLIC_WHATSAPP_NUMBER ?? "15551234567";
 
 const message =
   process.env.NEXT_PUBLIC_WHATSAPP_MESSAGE ??
-  "Hi ECOS, I would like to handover my schedule to you. Can you help me with that?";
+  "Hi eEA, I would like to handover my schedule to you. Can you help me with that?";
 
 export const WHATSAPP_URL = `https://wa.me/${number}?text=${encodeURIComponent(
   message,
 )}`;
 
-export const APP_NAME = "ECOS";
-export const APP_TAGLINE = "Electronic Chief Of Staff";
+export const APP_NAME = "eEA";
+export const APP_TAGLINE = "Electronic Executive Assistant";
 
 /** The legal business behind ECOS. Used in the footer and contact pages. */
 export const COMPANY = {
